@@ -13,9 +13,13 @@ Switch       button;
 // Loopers and the buffers they'll use
 float DSY_SDRAM_BSS buffer[kBuffSize];
 
-bool isRecording = false;
-size_t recordHeadPos = 0;
-size_t playHeadPos = 0;
+bool is_recording = false;
+size_t record_head_pos = 0;
+int grain_length = 48000 / 5; 
+int grain_progress = 0;
+float grain_start_offset = 0.f;
+int grain_count = 1;
+int count = 0;
 
 void AudioCallback(
     AudioHandle::InputBuffer  in,
@@ -25,20 +29,24 @@ void AudioCallback(
     patch.ProcessAllControls();
     button.Debounce();
 
+    // if (count % 200 == 0) {
+        grain_count = patch.GetAdcValue(CV_1) * 10 + 1;
+        grain_length = patch.GetAdcValue(CV_2) * 48000;
+    // }
+    
     // Toggle the record state on button press
     if(button.RisingEdge())
     {
-        if (!isRecording) {
-            isRecording = true;
-            recordHeadPos = 0;
+        if (!is_recording) {
+            is_recording = true;
+            record_head_pos = 0;
         } else {
-            isRecording = false;
-            playHeadPos = 0;
+            is_recording = false;
         }
     }
 
     // Set the led to 5V if the looper is recording
-    patch.SetLed(isRecording); 
+    patch.SetLed(is_recording); 
 
     // TODO: Fade in/out the ends of the track to prevent pops
     // TODO: Windowing to get rid of pops and squeaks
@@ -46,24 +54,38 @@ void AudioCallback(
     // Process audio
     for(size_t i = 0; i < size; i++)
     {
-        if (isRecording) {
-            buffer[recordHeadPos] = IN_L[i];
-            recordHeadPos++;
+        if (is_recording) {
+            buffer[record_head_pos] = IN_L[i];
+            record_head_pos++;
 
-            if (recordHeadPos >= kBuffSize) {
-                isRecording = false;
-                playHeadPos = 0;
+            if (record_head_pos >= kBuffSize) {
+                is_recording = false;
             }
 
             OUT_L[i] = IN_L[i];
         } else {
-            OUT_L[i] = buffer[playHeadPos] + IN_L[i];
-            playHeadPos++;
+            float wet = 0.f;
 
-            if (playHeadPos >= recordHeadPos) {
-                playHeadPos = 0;
+            for (int j = 0; j < grain_count; j++) {
+                size_t grain_offset = (3200 * j + grain_progress) % grain_length;
+                size_t grain_pos = ((size_t)grain_start_offset + grain_offset) % record_head_pos;
+
+                wet += buffer[grain_pos];
+            }
+
+            OUT_L[i] = wet;
+            grain_progress++;
+
+            if (grain_progress >= grain_length) {
+                grain_progress = 0;
             }
         }
+    }
+
+    count++;
+    grain_start_offset += 0.02 * size;
+    if (grain_start_offset >= std::max((int)record_head_pos - grain_length, 0)) {
+        grain_start_offset = 0.f;
     }
 }
 
