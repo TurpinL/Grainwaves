@@ -8,18 +8,27 @@ using namespace daisysp;
 DaisyPatchSM patch;
 Switch       button;
 
-#define kBuffSize 48000 * 3 // 3 seconds at 48kHz
+#define kBuffSize 48000 * 10 // X seconds at 48kHz
+#define max_grain_count 64
+
+
+struct Grain {
+    size_t length = 0;
+    size_t start_offset = 0;
+    size_t step = 0;
+};
 
 // Loopers and the buffers they'll use
 float DSY_SDRAM_BSS buffer[kBuffSize];
 
 bool is_recording = false;
 size_t record_head_pos = 0;
-int grain_length = 48000 / 5; 
-int grain_progress = 0;
+size_t grain_length = 48000 / 5; 
 float grain_start_offset = 0.f;
-int grain_count = 1;
-int count = 0;
+unsigned int spawn_rate = 1000 / 3; // ms
+uint32_t last_spawn_time = 0;
+size_t next_grain_to_spawn = 0;
+Grain grains[max_grain_count];
 
 void AudioCallback(
     AudioHandle::InputBuffer  in,
@@ -29,10 +38,8 @@ void AudioCallback(
     patch.ProcessAllControls();
     button.Debounce();
 
-    // if (count % 200 == 0) {
-        grain_count = patch.GetAdcValue(CV_1) * 10 + 1;
-        grain_length = patch.GetAdcValue(CV_2) * 48000;
-    // }
+    spawn_rate = 1000 * patch.GetAdcValue(CV_1);
+    grain_length = patch.GetAdcValue(CV_2) * 48000;
     
     // Toggle the record state on button press
     if(button.RisingEdge())
@@ -48,6 +55,20 @@ void AudioCallback(
     // Set the led to 5V if the looper is recording
     patch.SetLed(is_recording); 
 
+    if (!is_recording) {
+        if (System::GetNow() - last_spawn_time >= spawn_rate) {
+            last_spawn_time = System::GetNow();
+            grains[next_grain_to_spawn].length = grain_length;
+            grains[next_grain_to_spawn].start_offset = grain_start_offset;
+            grains[next_grain_to_spawn].step = 0;
+
+            next_grain_to_spawn = (next_grain_to_spawn + 1);
+            if (next_grain_to_spawn >= max_grain_count) {
+                next_grain_to_spawn = 0;
+            }
+        }
+    }
+
     // TODO: Fade in/out the ends of the track to prevent pops
     // TODO: Windowing to get rid of pops and squeaks
 
@@ -61,30 +82,33 @@ void AudioCallback(
             if (record_head_pos >= kBuffSize) {
                 is_recording = false;
             }
-
-            OUT_L[i] = IN_L[i];
+ 
+            // TODO: Get rid of this 0.5f and balance the output properly
+            OUT_L[i] = IN_L[i] * 0.5f;
         } else {
             float wet = 0.f;
 
-            for (int j = 0; j < grain_count; j++) {
-                size_t grain_offset = (3200 * j + grain_progress) % grain_length;
-                size_t grain_pos = ((size_t)grain_start_offset + grain_offset) % record_head_pos;
+            for (int j = 0; j < max_grain_count; j++) {
+                if (grains[j].step <= grains[j].length) {
+                    size_t buffer_index = (grains[j].start_offset + grains[j].step);
+                    if (buffer_index > record_head_pos) {
+                        buffer_index -= record_head_pos;
+                    }
 
-                wet += buffer[grain_pos];
+                    // hacky bad envelope
+                    // TODO: Get rid of this 0.75f and balance the output properly
+                    wet += buffer[buffer_index] * std::min((grains[j].length - grains[j].step), grains[j].step) / grains[j].length * 0.75f;
+
+                    grains[j].step++;
+                }
             }
 
             OUT_L[i] = wet;
-            grain_progress++;
-
-            if (grain_progress >= grain_length) {
-                grain_progress = 0;
-            }
         }
     }
 
-    count++;
-    grain_start_offset += 0.02 * size;
-    if (grain_start_offset >= std::max((int)record_head_pos - grain_length, 0)) {
+    grain_start_offset += 0.5f * size;
+    if (grain_start_offset >= record_head_pos) {
         grain_start_offset = 0.f;
     }
 }
@@ -100,4 +124,4 @@ int main(void)
     patch.StartAudio(AudioCallback);
 
     while(1) {}
-}
+} 
