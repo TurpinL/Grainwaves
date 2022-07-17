@@ -25,8 +25,9 @@ bool is_recording = false;
 size_t record_head_pos = 0;
 size_t grain_length = 48000 / 5; 
 float grain_start_offset = 0.f;
-unsigned int spawn_rate = 1000 / 3; // ms
+unsigned int spawn_rate = 48000 / 3; // samples
 uint32_t last_spawn_time = 0;
+uint32_t samples_seen = 0;
 size_t next_grain_to_spawn = 0;
 Grain grains[max_grain_count];
 
@@ -38,7 +39,7 @@ void AudioCallback(
     patch.ProcessAllControls();
     button.Debounce();
 
-    spawn_rate = 1000 * patch.GetAdcValue(CV_1);
+    spawn_rate = patch.GetAdcValue(CV_1) * 48000;
     grain_length = patch.GetAdcValue(CV_2) * 48000;
     
     // Toggle the record state on button press
@@ -55,26 +56,14 @@ void AudioCallback(
     // Set the led to 5V if the looper is recording
     patch.SetLed(is_recording); 
 
-    if (!is_recording) {
-        if (System::GetNow() - last_spawn_time >= spawn_rate) {
-            last_spawn_time = System::GetNow();
-            grains[next_grain_to_spawn].length = grain_length;
-            grains[next_grain_to_spawn].start_offset = grain_start_offset;
-            grains[next_grain_to_spawn].step = 0;
-
-            next_grain_to_spawn = (next_grain_to_spawn + 1);
-            if (next_grain_to_spawn >= max_grain_count) {
-                next_grain_to_spawn = 0;
-            }
-        }
-    }
-
     // TODO: Fade in/out the ends of the track to prevent pops
     // TODO: Windowing to get rid of pops and squeaks
 
     // Process audio
     for(size_t i = 0; i < size; i++)
     {
+        samples_seen++;
+
         if (is_recording) {
             buffer[record_head_pos] = IN_L[i];
             record_head_pos++;
@@ -86,6 +75,20 @@ void AudioCallback(
             // TODO: Get rid of this 0.5f and balance the output properly
             OUT_L[i] = IN_L[i] * 0.5f;
         } else {
+            // Spawn grains
+            if (samples_seen - last_spawn_time >= spawn_rate) {
+                last_spawn_time = samples_seen;
+                grains[next_grain_to_spawn].length = grain_length;
+                grains[next_grain_to_spawn].start_offset = grain_start_offset;
+                grains[next_grain_to_spawn].step = 0;
+
+                next_grain_to_spawn++;
+                if (next_grain_to_spawn >= max_grain_count) {
+                    next_grain_to_spawn = 0;
+                }
+            }    
+
+            // Calculate output
             float wet = 0.f;
 
             for (int j = 0; j < max_grain_count; j++) {
