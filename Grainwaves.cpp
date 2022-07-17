@@ -25,6 +25,7 @@ bool is_recording = false;
 size_t record_head_pos = 0;
 size_t grain_length = 48000 / 5; 
 float grain_start_offset = 0.f;
+float scan_speed;
 unsigned int spawn_rate = 48000 / 3; // samples
 uint32_t last_spawn_time = 0;
 uint32_t samples_seen = 0;
@@ -41,6 +42,7 @@ void AudioCallback(
 
     spawn_rate = patch.GetAdcValue(CV_1) * 48000;
     grain_length = patch.GetAdcValue(CV_2) * 48000;
+    scan_speed = (patch.GetAdcValue(CV_3) -0.5) * 6;
     
     // Toggle the record state on button press
     if(button.RisingEdge())
@@ -76,6 +78,7 @@ void AudioCallback(
             OUT_L[i] = IN_L[i] * 0.5f;
         } else {
             // Spawn grains
+            // TODO: This will break when samples_seen wraps
             if (samples_seen - last_spawn_time >= spawn_rate) {
                 last_spawn_time = samples_seen;
                 grains[next_grain_to_spawn].length = grain_length;
@@ -106,13 +109,17 @@ void AudioCallback(
                 }
             }
 
-            OUT_L[i] = wet;
+            OUT_L[i] = wet + IN_L[i] * 0.5f;
         }
     }
 
-    grain_start_offset += 0.5f * size;
+    grain_start_offset += scan_speed * size;
     if (grain_start_offset >= record_head_pos) {
         grain_start_offset = 0.f;
+    }
+
+    if (grain_start_offset < 0.f) {
+        grain_start_offset = record_head_pos;
     }
 }
 
@@ -120,11 +127,13 @@ int main(void)
 {
     patch.Init();
     button.Init(patch.B7);
-
-    // Clear the buffer
-    // std::fill(&buffer[0], &buffer[kBuffSize - 1], 0);
-
+    patch.StartLog();
     patch.StartAudio(AudioCallback);
 
-    while(1) {}
+    while(1) {
+        System::Delay(100);
+
+        patch.PrintLine("scan_speed: " FLT_FMT3, FLT_VAR3(scan_speed));
+    }
 } 
+ 
