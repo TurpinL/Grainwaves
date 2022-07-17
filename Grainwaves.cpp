@@ -25,12 +25,31 @@ bool is_recording = false;
 size_t record_head_pos = 0;
 size_t grain_length = 48000 / 5; 
 float grain_start_offset = 0.f;
+float grain_spread;
 float scan_speed;
 unsigned int spawn_rate = 48000 / 3; // samples
 uint32_t last_spawn_time = 0;
 uint32_t samples_seen = 0;
 size_t next_grain_to_spawn = 0;
 Grain grains[max_grain_count];
+
+float fwrap(float x, float min, float max) {
+    if (max == min) return min;
+    if (min > max) return fwrap(x, max, min);
+
+    return (x >= 0 ? min : max) + fmodf(x, max - min);
+}
+
+float wrap(size_t x, size_t min, size_t max) {
+    if (max == min) return min;
+    if (min > max) return wrap(x, max, min);
+
+    return (x >= 0 ? min : max) + x % (max - min);
+}
+
+float randF(float min, float max) {
+    return min + static_cast <float> (rand()) /( static_cast <float> (RAND_MAX/(max-min)));
+}
 
 void AudioCallback(
     AudioHandle::InputBuffer  in,
@@ -42,7 +61,8 @@ void AudioCallback(
 
     spawn_rate = patch.GetAdcValue(CV_1) * 48000;
     grain_length = patch.GetAdcValue(CV_2) * 48000;
-    scan_speed = (patch.GetAdcValue(CV_3) -0.5) * 6;
+    scan_speed = (patch.GetAdcValue(CV_3) -0.5) * 4;
+    grain_spread = patch.GetAdcValue(CV_4);
     
     // Toggle the record state on button press
     if(button.RisingEdge())
@@ -82,13 +102,10 @@ void AudioCallback(
             if (samples_seen - last_spawn_time >= spawn_rate) {
                 last_spawn_time = samples_seen;
                 grains[next_grain_to_spawn].length = grain_length;
-                grains[next_grain_to_spawn].start_offset = grain_start_offset;
+                grains[next_grain_to_spawn].start_offset = grain_start_offset + grain_spread * randF(-0.5f, 0.5f) * record_head_pos;
                 grains[next_grain_to_spawn].step = 0;
 
-                next_grain_to_spawn++;
-                if (next_grain_to_spawn >= max_grain_count) {
-                    next_grain_to_spawn = 0;
-                }
+                next_grain_to_spawn = (next_grain_to_spawn + 1) % max_grain_count;
             }    
 
             // Calculate output
@@ -96,10 +113,7 @@ void AudioCallback(
 
             for (int j = 0; j < max_grain_count; j++) {
                 if (grains[j].step <= grains[j].length) {
-                    size_t buffer_index = (grains[j].start_offset + grains[j].step);
-                    if (buffer_index > record_head_pos) {
-                        buffer_index -= record_head_pos;
-                    }
+                    size_t buffer_index = wrap(grains[j].start_offset + grains[j].step, 0, record_head_pos);
 
                     // hacky bad envelope
                     // TODO: Get rid of this 0.75f and balance the output properly
@@ -113,14 +127,7 @@ void AudioCallback(
         }
     }
 
-    grain_start_offset += scan_speed * size;
-    if (grain_start_offset >= record_head_pos) {
-        grain_start_offset = 0.f;
-    }
-
-    if (grain_start_offset < 0.f) {
-        grain_start_offset = record_head_pos;
-    }
+    grain_start_offset = fwrap(grain_start_offset + scan_speed * size, 0.f, record_head_pos);
 }
 
 int main(void)
@@ -133,7 +140,7 @@ int main(void)
     while(1) {
         System::Delay(100);
 
-        patch.PrintLine("scan_speed: " FLT_FMT3, FLT_VAR3(scan_speed));
+        patch.PrintLine("grain_start_offset: " FLT_FMT3, FLT_VAR3(grain_start_offset));
     }
 } 
  
