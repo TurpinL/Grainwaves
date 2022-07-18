@@ -1,5 +1,6 @@
 #include "daisy_patch_sm.h"
 #include "daisysp.h"
+#include "core_cm7.h"
 
 using namespace daisy;
 using namespace patch_sm;
@@ -33,6 +34,7 @@ uint32_t last_spawn_time = 0;
 uint32_t samples_seen = 0;
 size_t next_grain_to_spawn = 0;
 Grain grains[max_grain_count];
+uint32_t cycles_used = 0;
 
 float fwrap(float x, float min, float max) {
     if (max == min) return min;
@@ -57,6 +59,9 @@ void AudioCallback(
     AudioHandle::OutputBuffer out,
     size_t size
 ) {
+    // Clear cycle count
+    DWT->CYCCNT = 0;
+
     patch.ProcessAllControls();
     button.Debounce();
 
@@ -85,24 +90,11 @@ void AudioCallback(
     // TODO: Fade in/out the ends of the track to prevent pops
     // TODO: Windowing to get rid of pops and squeaks
 
-    samples_seen += size;
-
-    // Spawn grains
-    // TODO: This will break when samples_seen wraps
-    if (samples_seen - last_spawn_time >= modifier_spawn_rate) {
-        last_spawn_time = samples_seen;
-        grains[next_grain_to_spawn].length = grain_length;
-        grains[next_grain_to_spawn].start_offset = grain_start_offset + grain_spread * randF(-0.5f, 0.5f) * record_head_pos;
-        grains[next_grain_to_spawn].step = 0;
-        grains[next_grain_to_spawn].pan = 0.5f + randF(-0.5f, 0.5f) * pan_spread;
-
-        next_grain_to_spawn = (next_grain_to_spawn + 1) % max_grain_count;
-        next_spawn_offset = randF(-1.f, 1.f);
-    }    
-
     // Process audio
     for(size_t i = 0; i < size; i++)
     {
+        samples_seen++;
+
         if (is_recording) {
             buffer[record_head_pos] = IN_L[i];
             record_head_pos++;
@@ -112,9 +104,23 @@ void AudioCallback(
             }
  
             // TODO: Get rid of this 0.5f and balance the output properly
-            OUT_L[i] = IN_L[i] * 0.5f;
+            OUT_L[i] = IN_L[i];
             OUT_R[i] = OUT_L[i];
         } else {
+            // Spawn grains
+            // TODO: Somehow stop the popping when a grain is taken over by a new grain spawn
+            // TODO: This will break when samples_seen wraps
+            if (samples_seen - last_spawn_time >= modifier_spawn_rate) {
+                last_spawn_time = samples_seen;
+                grains[next_grain_to_spawn].length = grain_length;
+                grains[next_grain_to_spawn].start_offset = grain_start_offset + grain_spread * randF(-0.5f, 0.5f) * record_head_pos;
+                grains[next_grain_to_spawn].step = 0;
+                grains[next_grain_to_spawn].pan = 0.5f + randF(-0.5f, 0.5f) * pan_spread;
+
+                next_grain_to_spawn = (next_grain_to_spawn + 1) % max_grain_count;
+                next_spawn_offset = randF(-1.f, 1.f);
+            }
+
             // Calculate output
             float wetL = 0.f;
             float wetR = 0.f;
@@ -139,6 +145,8 @@ void AudioCallback(
     }
 
     grain_start_offset = fwrap(grain_start_offset + scan_speed * size, 0.f, record_head_pos);
+
+    cycles_used = DWT->CYCCNT;
 }
 
 int main(void)
@@ -146,12 +154,29 @@ int main(void)
     patch.Init();
     button.Init(patch.B7);
     patch.StartLog();
+
+    // Set-up for showing cycle count
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->LAR = 0xC5ACCE55;
+    DWT->CYCCNT = 0;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+
     patch.StartAudio(AudioCallback);
+
+    int live_grains = 0;
 
     while(1) {
         System::Delay(100);
 
-        patch.PrintLine("grain_start_offset: " FLT_FMT3, FLT_VAR3(grain_start_offset));
+        for (int j = 0; j < max_grain_count; j++) {
+            if (grains[j].step <= grains[j].length) {
+                live_grains++;
+            }
+        }
+
+        patch.PrintLine("live_grains: %d --- cycles_used: %d", cycles_used, live_grains);
+        // patch.PrintLine("grain_start_offset: " FLT_FMT3, FLT_VAR3(grain_start_offset));
+        live_grains = 0;
     }
 } 
  
