@@ -2,7 +2,7 @@
 TARGET = Grainwaves
 
 # Sources
-CPP_SOURCES = Grainwaves.cpp
+CPP_SOURCES = Grainwaves.cpp Daisy_SSD1327/Daisy_SSD1327.cpp
 
 # Library Locations
 LIBDAISY_DIR = ../../libDaisy/

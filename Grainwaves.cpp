@@ -1,6 +1,7 @@
 #include "daisy_patch_sm.h"
 #include "daisysp.h"
 #include "core_cm7.h"
+#include "Daisy_SSD1327/Daisy_SSD1327.h"
 
 using namespace daisy;
 using namespace patch_sm;
@@ -8,6 +9,12 @@ using namespace daisysp;
 
 DaisyPatchSM patch;
 Switch       button;
+
+uint8_t DMA_BUFFER_MEM_SECTION oled_buffer[SSD1327_REQUIRED_DMA_BUFFER_SIZE];
+Daisy_SSD1327 oled;
+SpiHandle spi;
+dsy_gpio dc_pin;
+I2CHandle i2c;
 
 #define kBuffSize 48000 * 10 // X seconds at 48kHz
 #define max_grain_count 64
@@ -24,12 +31,13 @@ struct Grain {
 float DSY_SDRAM_BSS buffer[kBuffSize];
 
 bool is_recording = false;
-size_t record_head_pos = 0;
+size_t record_head_pos = 0; // Also used as recording length
 size_t grain_length = 48000 / 5; 
 float grain_start_offset = 0.f;
 unsigned int spawn_rate = 48000 / 3; // samples
 float spawn_rate_spread;
 float next_spawn_offset;
+float pan_spread;
 uint32_t last_spawn_time = 0;
 uint32_t samples_seen = 0;
 size_t next_grain_to_spawn = 0;
@@ -69,7 +77,7 @@ void AudioCallback(
     grain_length = patch.GetAdcValue(CV_2) * 48000;
     float scan_speed = (patch.GetAdcValue(CV_3) -0.5) * 4;
     float grain_spread = patch.GetAdcValue(CV_4);
-    float pan_spread = patch.GetAdcValue(CV_5);
+    pan_spread = patch.GetAdcValue(CV_5);
     float spawn_rate_spread = patch.GetAdcValue(CV_6);
     float modifier_spawn_rate = spawn_rate * (1 + next_spawn_offset * spawn_rate_spread);
     
@@ -149,11 +157,27 @@ void AudioCallback(
     cycles_used = DWT->CYCCNT;
 }
 
+uint32_t last_render_millis = 0;
+uint32_t last_debug_print_millis = 0;
+
 int main(void)
 {
     patch.Init();
     button.Init(patch.B7);
     patch.StartLog();
+
+    spi.Init(
+        oled.getSpiConfig(
+            patch.D10, /* sclk */
+            patch.D9, /* mosi */
+            patch.D8, /* miso */
+            patch.D1 /* nss */
+        )
+    );
+
+    oled.init(spi, patch.A9, oled_buffer, patch);
+    oled.clear(0x5);
+    oled.display();
 
     // Set-up for showing cycle count
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
@@ -163,20 +187,46 @@ int main(void)
 
     patch.StartAudio(AudioCallback);
 
-    int live_grains = 0;
-
     while(1) {
-        System::Delay(100);
+        if (System::GetNow() - last_render_millis > 8 && !oled.isRendering()) {
+            last_render_millis = System::GetNow();
 
-        for (int j = 0; j < max_grain_count; j++) {
-            if (grains[j].step <= grains[j].length) {
-                live_grains++;
+            oled.clear(SSD1327_BLACK);
+
+            // Grain start offset
+            float grain_start_offset_y = grain_start_offset / (float)record_head_pos * oled.height;
+            float grain_start_offset_y_2 = grain_start_offset_y - (uint8_t)grain_start_offset_y;
+            float grain_start_offset_y_1 = 1 - grain_start_offset_y_2;
+            uint8_t x_margin = (oled.width - (pan_spread * oled.width)) / 2;
+
+            for (uint8_t x = x_margin; x < oled.width - x_margin; x++) {
+                oled.setPixel(x, grain_start_offset_y, 0x2 + 0x4 * grain_start_offset_y_1);
+                oled.setPixel(x, wrap(grain_start_offset_y + 1, 0, oled.height), 0x2 + 0x4 * grain_start_offset_y_2);
             }
+
+            // Grains
+            for (int j = 0; j < max_grain_count; j++) {
+                Grain grain = grains[j];
+
+                if (grain.step <= grain.length) {
+                    uint8_t x = grain.pan * oled.width;
+                    uint32_t currentOffset = wrap(grain.start_offset + grain.step, 0, record_head_pos);
+                    float y = (currentOffset / (float)record_head_pos) * oled.height;
+
+                    float amplitude = std::min((grains[j].length - grains[j].step), grains[j].step) / (float)grains[j].length;
+
+                    oled.setPixel(x, y, 0xF * amplitude);
+                }
+            }
+            oled.display();
         }
 
-        patch.PrintLine("live_grains: %d --- cycles_used: %d", cycles_used, live_grains);
-        // patch.PrintLine("grain_start_offset: " FLT_FMT3, FLT_VAR3(grain_start_offset));
-        live_grains = 0;
+        if (System::GetNow() - last_debug_print_millis) {
+            last_debug_print_millis = System::GetNow();
+
+            patch.PrintLine("cycles_used: %d", cycles_used);
+            // patch.PrintLine("grain_start_offset: " FLT_FMT3, FLT_VAR3(grain_start_offset));
+        }
     }
 } 
  

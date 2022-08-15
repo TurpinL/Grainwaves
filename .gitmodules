@@ -1,0 +1,3 @@
+[submodule "Daisy_SSD1327"]
+	path = Daisy_SSD1327
+	url = https://github.com/TurpinL/Daisy_SSD1327
