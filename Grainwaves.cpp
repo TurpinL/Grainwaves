@@ -8,6 +8,7 @@ using namespace patch_sm;
 using namespace daisysp;
 
 DaisyPatchSM patch;
+CpuLoadMeter cpuLoadMeter;
 Switch       button;
 
 uint8_t DMA_BUFFER_MEM_SECTION oled_buffer[SSD1327_REQUIRED_DMA_BUFFER_SIZE];
@@ -67,8 +68,7 @@ void AudioCallback(
     AudioHandle::OutputBuffer out,
     size_t size
 ) {
-    // Clear cycle count
-    DWT->CYCCNT = 0;
+    cpuLoadMeter.OnBlockStart();
 
     patch.ProcessAllControls();
     button.Debounce();
@@ -154,7 +154,7 @@ void AudioCallback(
 
     grain_start_offset = fwrap(grain_start_offset + scan_speed * size, 0.f, record_head_pos);
 
-    cycles_used = DWT->CYCCNT;
+    cpuLoadMeter.OnBlockEnd();
 }
 
 uint32_t last_render_millis = 0;
@@ -179,12 +179,7 @@ int main(void)
     oled.clear(0x5);
     oled.display();
 
-    // Set-up for showing cycle count
-    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
-    DWT->LAR = 0xC5ACCE55;
-    DWT->CYCCNT = 0;
-    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
-
+    cpuLoadMeter.Init(patch.AudioSampleRate(), patch.AudioBlockSize());
     patch.StartAudio(AudioCallback);
 
     while(1) {
@@ -221,10 +216,11 @@ int main(void)
             oled.display();
         }
 
-        if (System::GetNow() - last_debug_print_millis) {
+        if (System::GetNow() - last_debug_print_millis > 250) {
             last_debug_print_millis = System::GetNow();
 
-            patch.PrintLine("cycles_used: %d", cycles_used);
+            // Note, this ignores any work done in this loop, eg running the OLED
+            patch.PrintLine("cpu Max:" FLT_FMT3 "\tAvg:" FLT_FMT3, FLT_VAR3(cpuLoadMeter.GetMaxCpuLoad()), FLT_VAR3(cpuLoadMeter.GetAvgCpuLoad()));
             // patch.PrintLine("grain_start_offset: " FLT_FMT3, FLT_VAR3(grain_start_offset));
         }
     }
