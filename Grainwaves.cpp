@@ -18,8 +18,9 @@ dsy_gpio dc_pin;
 I2CHandle i2c;
 
 #define kBuffSize 48000 * 10 // X seconds at 48kHz
+#define min_grain_size 480 // 10 ms
+#define max_grain_size 48000 // 1 second
 #define max_grain_count 64
-
 
 struct Grain {
     size_t length = 0;
@@ -41,8 +42,8 @@ float next_spawn_offset;
 float pan_spread;
 uint32_t last_spawn_time = 0;
 uint32_t samples_seen = 0;
-size_t next_grain_to_spawn = 0;
 Grain grains[max_grain_count];
+Stack<uint8_t, max_grain_count> available_grains;
 uint32_t cycles_used = 0;
 
 float fwrap(float x, float min, float max) {
@@ -73,8 +74,8 @@ void AudioCallback(
     patch.ProcessAllControls();
     button.Debounce();
 
-    spawn_rate = patch.GetAdcValue(CV_1) * 48000;
-    grain_length = patch.GetAdcValue(CV_2) * 48000;
+    spawn_rate = (1 - patch.GetAdcValue(CV_1)) * 48000;
+    grain_length = min_grain_size + patch.GetAdcValue(CV_2) * (max_grain_size - min_grain_size);
     float scan_speed = (patch.GetAdcValue(CV_3) -0.5) * 4;
     float grain_spread = patch.GetAdcValue(CV_4);
     pan_spread = patch.GetAdcValue(CV_5);
@@ -119,16 +120,16 @@ void AudioCallback(
             OUT_R[i] = OUT_L[i];
         } else {
             // Spawn grains
-            // TODO: Somehow stop the popping when a grain is taken over by a new grain spawn
             // TODO: This will break when samples_seen wraps
-            if (samples_seen - last_spawn_time >= modified_spawn_rate) {
+            if (samples_seen - last_spawn_time >= modified_spawn_rate && !available_grains.IsEmpty()) {
+                size_t next_grain_to_spawn = available_grains.PopBack();
+
                 last_spawn_time = samples_seen;
                 grains[next_grain_to_spawn].length = grain_length;
                 grains[next_grain_to_spawn].start_offset = wrap(grain_start_offset + grain_spread * randF(-0.5f, 0.5f) * recording_length, 0, recording_length);
                 grains[next_grain_to_spawn].step = 0;
                 grains[next_grain_to_spawn].pan = 0.5f + randF(-0.5f, 0.5f) * pan_spread;
 
-                next_grain_to_spawn = (next_grain_to_spawn + 1) % max_grain_count;
                 next_spawn_offset = randF(-1.f, 1.f);
             }
 
@@ -146,6 +147,10 @@ void AudioCallback(
                     wetL += (1.f - grains[j].pan) * signal;
                     wetR += grains[j].pan * signal;
 
+                    if (grains[j].step == grains[j].length) {
+                        available_grains.PushBack(j);
+                    }
+                    
                     grains[j].step++;
                 }
             }
@@ -181,6 +186,11 @@ int main(void)
     oled.init(spi, patch.A9, oled_buffer, patch);
     oled.clear(0x5);
     oled.display();
+
+    // Populate available grains stack
+    for (u_int8_t i = 0; i < max_grain_count; i++) {
+        available_grains.PushBack(i);
+    }
 
     cpuLoadMeter.Init(patch.AudioSampleRate(), patch.AudioBlockSize());
     patch.StartAudio(AudioCallback);
