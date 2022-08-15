@@ -32,7 +32,7 @@ struct Grain {
 float DSY_SDRAM_BSS buffer[kBuffSize];
 
 bool is_recording = false;
-size_t record_head_pos = 0; // Also used as recording length
+size_t recording_length = 0;
 size_t grain_length = 48000 / 5; 
 float grain_start_offset = 0.f;
 unsigned int spawn_rate = 48000 / 3; // samples
@@ -52,7 +52,7 @@ float fwrap(float x, float min, float max) {
     return (x >= 0 ? min : max) + fmodf(x, max - min);
 }
 
-float wrap(size_t x, size_t min, size_t max) {
+float wrap(int x, int min, int max) {
     if (max == min) return min;
     if (min > max) return wrap(x, max, min);
 
@@ -79,14 +79,14 @@ void AudioCallback(
     float grain_spread = patch.GetAdcValue(CV_4);
     pan_spread = patch.GetAdcValue(CV_5);
     float spawn_rate_spread = patch.GetAdcValue(CV_6);
-    float modifier_spawn_rate = spawn_rate * (1 + next_spawn_offset * spawn_rate_spread);
+    float modified_spawn_rate = spawn_rate * (1 + next_spawn_offset * spawn_rate_spread);
     
     // Toggle the record state on button press
     if(button.RisingEdge())
     {
         if (!is_recording) {
             is_recording = true;
-            record_head_pos = 0;
+            recording_length = 0;
         } else {
             is_recording = false;
         }
@@ -104,24 +104,27 @@ void AudioCallback(
         samples_seen++;
 
         if (is_recording) {
-            buffer[record_head_pos] = IN_L[i];
-            record_head_pos++;
+            buffer[recording_length] = IN_L[i];
+            recording_length++;
 
-            if (record_head_pos >= kBuffSize) {
+            if (recording_length >= kBuffSize) {
                 is_recording = false;
             }
  
-            // TODO: Get rid of this 0.5f and balance the output properly
+            OUT_L[i] = IN_L[i];
+            OUT_R[i] = OUT_L[i];
+        } else if (recording_length == 0) {
+            // Just pass through if there's no recording
             OUT_L[i] = IN_L[i];
             OUT_R[i] = OUT_L[i];
         } else {
             // Spawn grains
             // TODO: Somehow stop the popping when a grain is taken over by a new grain spawn
             // TODO: This will break when samples_seen wraps
-            if (samples_seen - last_spawn_time >= modifier_spawn_rate) {
+            if (samples_seen - last_spawn_time >= modified_spawn_rate) {
                 last_spawn_time = samples_seen;
                 grains[next_grain_to_spawn].length = grain_length;
-                grains[next_grain_to_spawn].start_offset = grain_start_offset + grain_spread * randF(-0.5f, 0.5f) * record_head_pos;
+                grains[next_grain_to_spawn].start_offset = wrap(grain_start_offset + grain_spread * randF(-0.5f, 0.5f) * recording_length, 0, recording_length);
                 grains[next_grain_to_spawn].step = 0;
                 grains[next_grain_to_spawn].pan = 0.5f + randF(-0.5f, 0.5f) * pan_spread;
 
@@ -135,7 +138,7 @@ void AudioCallback(
 
             for (int j = 0; j < max_grain_count; j++) {
                 if (grains[j].step <= grains[j].length) {
-                    size_t buffer_index = wrap(grains[j].start_offset + grains[j].step, 0, record_head_pos);
+                    size_t buffer_index = wrap(grains[j].start_offset + grains[j].step, 0, recording_length);
 
                     // hacky bad envelope
                     // TODO: Get rid of this 0.75f and balance the output properly
@@ -152,7 +155,7 @@ void AudioCallback(
         }
     }
 
-    grain_start_offset = fwrap(grain_start_offset + scan_speed * size, 0.f, record_head_pos);
+    grain_start_offset = fwrap(grain_start_offset + scan_speed * size, 0.f, recording_length);
 
     cpuLoadMeter.OnBlockEnd();
 }
@@ -189,7 +192,7 @@ int main(void)
             oled.clear(SSD1327_BLACK);
 
             // Grain start offset
-            float grain_start_offset_y = grain_start_offset / (float)record_head_pos * oled.height;
+            float grain_start_offset_y = grain_start_offset / (float)recording_length * oled.height;
             float grain_start_offset_y_2 = grain_start_offset_y - (uint8_t)grain_start_offset_y;
             float grain_start_offset_y_1 = 1 - grain_start_offset_y_2;
             uint8_t x_margin = (oled.width - (pan_spread * oled.width)) / 2;
@@ -205,8 +208,8 @@ int main(void)
 
                 if (grain.step <= grain.length) {
                     uint8_t x = grain.pan * oled.width;
-                    uint32_t currentOffset = wrap(grain.start_offset + grain.step, 0, record_head_pos);
-                    float y = (currentOffset / (float)record_head_pos) * oled.height;
+                    uint32_t currentOffset = wrap(grain.start_offset + grain.step, 0, recording_length);
+                    float y = (currentOffset / (float)recording_length) * oled.height;
 
                     float amplitude = std::min((grains[j].length - grains[j].step), grains[j].step) / (float)grains[j].length;
 
