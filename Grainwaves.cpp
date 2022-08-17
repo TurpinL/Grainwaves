@@ -22,7 +22,7 @@ struct Grain {
 };
 
 DaisyPatchSM patch;
-CpuLoadMeter cpuLoadMeter;
+CpuLoadMeter cpu_load_meter;
 Switch       record_button;
 Switch       shift_button;
 
@@ -70,7 +70,7 @@ float randF(float min, float max) {
     return min + rand() * kRandFrac * (max - min);
 }
 
-float mapToRange(float fraction, float min, float max) {
+float map_to_range(float fraction, float min, float max) {
     return min + fraction * (max - min);
 }
 
@@ -104,20 +104,20 @@ void AudioCallback(
     AudioHandle::OutputBuffer out,
     size_t size
 ) {
-    cpuLoadMeter.OnBlockStart();
+    cpu_load_meter.OnBlockStart();
 
     patch.ProcessAllControls();
     record_button.Debounce();
     shift_button.Debounce();
 
-    spawn_rate = mapToRange(1 - patch.GetAdcValue(CV_1), MIN_GRAIN_SIZE, MAX_GRAIN_SIZE);
-    grain_length = mapToRange(patch.GetAdcValue(CV_2), MIN_GRAIN_SIZE, MAX_GRAIN_SIZE);
-    float scan_speed = mapToRange(patch.GetAdcValue(CV_3), -2, 2);
+    spawn_rate = map_to_range(1 - patch.GetAdcValue(CV_1), MIN_GRAIN_SIZE, MAX_GRAIN_SIZE);
+    grain_length = map_to_range(patch.GetAdcValue(CV_2), MIN_GRAIN_SIZE, MAX_GRAIN_SIZE);
+    float scan_speed = map_to_range(patch.GetAdcValue(CV_3), -2, 2);
     float grain_spread = patch.GetAdcValue(CV_4);
     pan_spread = patch.GetAdcValue(CV_5);
     float spawn_rate_spread = patch.GetAdcValue(CV_6);
     float modified_spawn_rate = spawn_rate * (1 + next_spawn_offset * spawn_rate_spread);
-    float pitch_shift_in_semitones = mapToRange(patch.GetAdcValue(CV_7), -12 * 5, 12 * 5); // volt per octave
+    float pitch_shift_in_semitones = map_to_range(patch.GetAdcValue(CV_7), -12 * 5, 12 * 5); // volt per octave
     float pitch_shift_spread = patch.GetAdcValue(CV_8);
 
     // Toggle the record state on button press
@@ -175,8 +175,8 @@ void AudioCallback(
             }
 
             // Calculate output
-            float wetL = 0.f;
-            float wetR = 0.f;
+            float wet_l = 0.f;
+            float wet_r = 0.f;
 
             for (int j = 0; j < MAX_GRAIN_COUNT; j++) {
                 if (grains[j].step <= grains[j].length) {
@@ -184,17 +184,17 @@ void AudioCallback(
 
                     // playback_speed is a float so we need to interpolate between samples
                     float sample = getSample(buffer_index);
-                    float nextSample = getSample(buffer_index + 1);
+                    float next_sample = getSample(buffer_index + 1);
 
                     float decimal_portion = modf(grains[j].step * grains[j].playback_speed);
-                    float interpolated_sample = sample * (1 - decimal_portion) + nextSample * decimal_portion;
+                    float interpolated_sample = sample * (1 - decimal_portion) + next_sample * decimal_portion;
 
                     // hacky bad envelope
                     float envelope_mult = std::min((grains[j].length - grains[j].step), grains[j].step);
                     // TODO: Get rid of this 0.75f and balance the output properly
                     float signal = interpolated_sample * envelope_mult / grains[j].length * 0.75f;
-                    wetL += (1.f - grains[j].pan) * signal;
-                    wetR += grains[j].pan * signal;
+                    wet_l += (1.f - grains[j].pan) * signal;
+                    wet_r += grains[j].pan * signal;
 
                     grains[j].step++;
 
@@ -204,14 +204,14 @@ void AudioCallback(
                 }
             }
 
-            OUT_L[i] = wetL + IN_L[i];
-            OUT_R[i] = wetR + IN_L[i];
+            OUT_L[i] = wet_l + IN_L[i];
+            OUT_R[i] = wet_r + IN_L[i];
         } 
     }
 
     grain_start_offset = fwrap(grain_start_offset + scan_speed * size, 0.f, recording_length);
 
-    cpuLoadMeter.OnBlockEnd();
+    cpu_load_meter.OnBlockEnd();
 }
 
 uint32_t last_render_millis = 0;
@@ -242,7 +242,7 @@ int main(void)
         available_grains.PushBack(i);
     }
 
-    cpuLoadMeter.Init(patch.AudioSampleRate(), patch.AudioBlockSize());
+    cpu_load_meter.Init(patch.AudioSampleRate(), patch.AudioBlockSize());
     patch.StartAudio(AudioCallback);
 
     while(1) {
@@ -261,8 +261,8 @@ int main(void)
             uint8_t x_margin = (oled.width - (pan_spread * oled.width)) / 2;
 
             for (uint8_t x = x_margin; x < oled.width - x_margin; x++) {
-                oled.setPixel(x, grain_start_offset_y, mapToRange(1 - grain_start_offset_y_decimal_part, 0x2, 0x6));
-                oled.setPixel(x, wrap(grain_start_offset_y + 1, 0, oled.height), mapToRange(grain_start_offset_y_decimal_part, 0x2, 0x6));
+                oled.setPixel(x, grain_start_offset_y, map_to_range(1 - grain_start_offset_y_decimal_part, 0x2, 0x6));
+                oled.setPixel(x, wrap(grain_start_offset_y + 1, 0, oled.height), map_to_range(grain_start_offset_y_decimal_part, 0x2, 0x6));
             }
 
             // Grains
@@ -271,8 +271,8 @@ int main(void)
 
                 if (grain.step <= grain.length) {
                     uint8_t x = grain.pan * oled.width;
-                    uint32_t currentOffset = wrap(grain.start_offset + grain.step * grains[j].playback_speed, 0, recording_length);
-                    float y = (currentOffset / (float)recording_length) * oled.height;
+                    uint32_t current_offset = wrap(grain.start_offset + grain.step * grains[j].playback_speed, 0, recording_length);
+                    float y = (current_offset / (float)recording_length) * oled.height;
 
                     float amplitude = std::min((grains[j].length - grains[j].step), grains[j].step) / (float)grains[j].length;
 
@@ -287,8 +287,8 @@ int main(void)
             last_debug_print_millis = System::GetNow();
 
             // Note, this ignores any work done in this loop, eg running the OLED
-            patch.PrintLine("cpu Max:" FLT_FMT3 "\tAvg:" FLT_FMT3, FLT_VAR3(cpuLoadMeter.GetMaxCpuLoad()), FLT_VAR3(cpuLoadMeter.GetAvgCpuLoad()));
-            // patch.PrintLine(FLT_FMT3, FLT_VAR3(round(mapToRange(patch.GetAdcValue(CV_7), -12, 12)) / 12));
+            patch.PrintLine("cpu Max:" FLT_FMT3 "\tAvg:" FLT_FMT3, FLT_VAR3(cpu_load_meter.GetMaxCpuLoad()), FLT_VAR3(cpu_load_meter.GetAvgCpuLoad()));
+            // patch.PrintLine(FLT_FMT3, FLT_VAR3(round(map_to_range(patch.GetAdcValue(CV_7), -12, 12)) / 12));
             // patch.PrintLine("grain_start_offset: " FLT_FMT3, FLT_VAR3(grain_start_offset));
         }
     }
