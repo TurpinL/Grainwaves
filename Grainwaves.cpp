@@ -7,6 +7,20 @@ using namespace daisy;
 using namespace patch_sm;
 using namespace daisysp;
 
+#define RECORDING_XFADE_OVERLAP 100 // Samples
+#define RECORDING_BUFFER_SIZE 48000 * 10 // X seconds at 48kHz
+#define MIN_GRAIN_SIZE 480 // 10 ms
+#define MAX_GRAIN_SIZE 48000 // 1 second
+#define MAX_GRAIN_COUNT 64
+
+struct Grain {
+    size_t length = 0;
+    size_t start_offset = 0;
+    size_t step = 0;
+    float pan = 0; // 0 is left, 1 is right
+    float playback_speed = 0;
+};
+
 DaisyPatchSM patch;
 CpuLoadMeter cpuLoadMeter;
 Switch       record_button;
@@ -18,21 +32,7 @@ SpiHandle spi;
 dsy_gpio dc_pin;
 I2CHandle i2c;
 
-#define kBuffSize 48000 * 10 // X seconds at 48kHz
-#define min_grain_size 480 // 10 ms
-#define max_grain_size 48000 // 1 second
-#define max_grain_count 64
-
-struct Grain {
-    size_t length = 0;
-    size_t start_offset = 0;
-    size_t step = 0;
-    float pan = 0; // 0 is left, 1 is right
-    float playback_speed = 0;
-};
-
-// Loopers and the buffers they'll use
-float DSY_SDRAM_BSS buffer[kBuffSize];
+float DSY_SDRAM_BSS recording[RECORDING_BUFFER_SIZE];
 
 bool is_recording = false;
 size_t recording_length = 0;
@@ -44,8 +44,8 @@ float next_spawn_offset;
 float pan_spread;
 uint32_t last_spawn_time = 0;
 uint32_t samples_seen = 0;
-Grain grains[max_grain_count];
-Stack<uint8_t, max_grain_count> available_grains;
+Grain grains[MAX_GRAIN_COUNT];
+Stack<uint8_t, MAX_GRAIN_COUNT> available_grains;
 uint32_t cycles_used = 0;
 
 float fwrap(float x, float min, float max) {
@@ -62,6 +62,10 @@ int wrap(int x, int min, int max) {
     return (x >= 0 ? min : max) + x % (max - min);
 }
 
+float lerp(float a, float b, float t) {
+    return a + t * (b - a);
+}
+
 float randF(float min, float max) {
     return min + rand() * kRandFrac * (max - min);
 }
@@ -75,6 +79,26 @@ float modf(float x) {
     return modf(x, &junk);
 }
 
+// Responsible for wrapping the index
+// and xfading the start and end of the track 
+// to get rid of the pop when transitioning from 
+// the last to the first sample of the recording
+float getSample(int index) {
+    index = wrap(index, 0, recording_length);
+
+    if (index < RECORDING_XFADE_OVERLAP) {
+        float xfade_magnitude = 1 - (index + 1) / ((float)RECORDING_XFADE_OVERLAP + 1.f);
+
+        return lerp(
+            recording[index], 
+            recording[recording_length - 1], 
+            xfade_magnitude
+        );
+    } else {
+        return recording[index];
+    }
+}
+
 void AudioCallback(
     AudioHandle::InputBuffer  in,
     AudioHandle::OutputBuffer out,
@@ -86,8 +110,8 @@ void AudioCallback(
     record_button.Debounce();
     shift_button.Debounce();
 
-    spawn_rate = mapToRange(1 - patch.GetAdcValue(CV_1), min_grain_size, max_grain_size);
-    grain_length = mapToRange(patch.GetAdcValue(CV_2), min_grain_size, max_grain_size);
+    spawn_rate = mapToRange(1 - patch.GetAdcValue(CV_1), MIN_GRAIN_SIZE, MAX_GRAIN_SIZE);
+    grain_length = mapToRange(patch.GetAdcValue(CV_2), MIN_GRAIN_SIZE, MAX_GRAIN_SIZE);
     float scan_speed = mapToRange(patch.GetAdcValue(CV_3), -2, 2);
     float grain_spread = patch.GetAdcValue(CV_4);
     pan_spread = patch.GetAdcValue(CV_5);
@@ -110,19 +134,16 @@ void AudioCallback(
     // Set the led to 5V if the looper is recording
     patch.SetLed(is_recording || shift_button.Pressed()); 
 
-    // TODO: Fade in/out the ends of the track to prevent pops
-    // TODO: Windowing to get rid of pops and squeaks
-
     // Process audio
     for(size_t i = 0; i < size; i++)
     {
         samples_seen++;
 
         if (is_recording) {
-            buffer[recording_length] = IN_L[i];
+            recording[recording_length] = IN_L[i];
             recording_length++;
 
-            if (recording_length >= kBuffSize) {
+            if (recording_length >= RECORDING_BUFFER_SIZE) {
                 is_recording = false;
             }
  
@@ -141,7 +162,7 @@ void AudioCallback(
                 last_spawn_time = samples_seen;
 
                 grains[next_grain_to_spawn].length = grain_length;
-                grains[next_grain_to_spawn].start_offset = wrap(grain_start_offset + grain_spread * randF(-0.5f, 0.5f) * recording_length, 0, recording_length);
+                grains[next_grain_to_spawn].start_offset = grain_start_offset + grain_spread * randF(-0.5f, 0.5f) * recording_length;
                 grains[next_grain_to_spawn].step = 0;
                 grains[next_grain_to_spawn].pan = 0.5f + randF(-0.5f, 0.5f) * pan_spread;
 
@@ -157,13 +178,13 @@ void AudioCallback(
             float wetL = 0.f;
             float wetR = 0.f;
 
-            for (int j = 0; j < max_grain_count; j++) {
+            for (int j = 0; j < MAX_GRAIN_COUNT; j++) {
                 if (grains[j].step <= grains[j].length) {
-                    size_t buffer_index = wrap(grains[j].start_offset + grains[j].step * grains[j].playback_speed, 0, recording_length);
+                    size_t buffer_index = grains[j].start_offset + grains[j].step * grains[j].playback_speed;
 
                     // playback_speed is a float so we need to interpolate between samples
-                    float sample = buffer[buffer_index];
-                    float nextSample = buffer[wrap(buffer_index + 1, 0, recording_length)];
+                    float sample = getSample(buffer_index);
+                    float nextSample = getSample(buffer_index + 1);
 
                     float decimal_portion = modf(grains[j].step * grains[j].playback_speed);
                     float interpolated_sample = sample * (1 - decimal_portion) + nextSample * decimal_portion;
@@ -185,7 +206,7 @@ void AudioCallback(
 
             OUT_L[i] = wetL + IN_L[i];
             OUT_R[i] = wetR + IN_L[i];
-        }
+        } 
     }
 
     grain_start_offset = fwrap(grain_start_offset + scan_speed * size, 0.f, recording_length);
@@ -217,7 +238,7 @@ int main(void)
     oled.display();
 
     // Populate available grains stack
-    for (u_int8_t i = 0; i < max_grain_count; i++) {
+    for (u_int8_t i = 0; i < MAX_GRAIN_COUNT; i++) {
         available_grains.PushBack(i);
     }
 
@@ -245,7 +266,7 @@ int main(void)
             }
 
             // Grains
-            for (int j = 0; j < max_grain_count; j++) {
+            for (int j = 0; j < MAX_GRAIN_COUNT; j++) {
                 Grain grain = grains[j];
 
                 if (grain.step <= grain.length) {
