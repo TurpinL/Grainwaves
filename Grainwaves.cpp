@@ -256,13 +256,13 @@ int main(void)
             }
 
             // Grain start offset
-            float grain_start_offset_y = grain_start_offset / (float)recording_length * oled.height;
-            float grain_start_offset_y_decimal_part = modf(grain_start_offset_y);
-            uint8_t x_margin = (oled.width - (pan_spread * oled.width)) / 2;
+            float grain_start_offset_x = grain_start_offset / (float)recording_length * oled.height;
+            float grain_start_offset_x_decimal_part = modf(grain_start_offset_x);
+            uint8_t y_margin = (oled.width - (pan_spread * oled.width)) / 2;
 
-            for (uint8_t x = x_margin; x < oled.width - x_margin; x++) {
-                oled.setPixel(x, grain_start_offset_y, map_to_range(1 - grain_start_offset_y_decimal_part, 0x2, 0x6));
-                oled.setPixel(x, wrap(grain_start_offset_y + 1, 0, oled.height), map_to_range(grain_start_offset_y_decimal_part, 0x2, 0x6));
+            for (uint8_t y = y_margin; y < oled.width - y_margin; y++) {
+                oled.setPixel(grain_start_offset_x, y, map_to_range(1 - grain_start_offset_x_decimal_part, 0x2, 0x6));
+                oled.setPixel(wrap(grain_start_offset_x + 1, 0, oled.height), y, map_to_range(grain_start_offset_x_decimal_part, 0x2, 0x6));
             }
 
             // Grains
@@ -270,9 +270,9 @@ int main(void)
                 Grain grain = grains[j];
 
                 if (grain.step <= grain.length) {
-                    uint8_t x = grain.pan * oled.width;
+                    uint8_t y = grain.pan * oled.width;
                     uint32_t current_offset = wrap(grain.start_offset + grain.step * grains[j].playback_speed, 0, recording_length);
-                    float y = (current_offset / (float)recording_length) * oled.height;
+                    float x = (current_offset / (float)recording_length) * oled.height;
 
                     float amplitude = std::min((grains[j].length - grains[j].step), grains[j].step) / (float)grains[j].length;
 
