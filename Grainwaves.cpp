@@ -15,7 +15,7 @@ using namespace daisysp;
 
 struct Grain {
     size_t length = 0;
-    size_t start_offset = 0;
+    int start_offset = 0;
     size_t step = 0;
     float pan = 0; // 0 is left, 1 is right
     float playback_speed = 0;
