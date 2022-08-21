@@ -8,7 +8,7 @@ using namespace patch_sm;
 using namespace daisysp;
 
 #define RECORDING_XFADE_OVERLAP 100 // Samples
-#define RECORDING_BUFFER_SIZE 48000 * 10 // X seconds at 48kHz
+#define RECORDING_BUFFER_SIZE (48000 * 10) // X seconds at 48kHz
 #define MIN_GRAIN_SIZE 480 // 10 ms
 #define MAX_GRAIN_SIZE 48000 // 1 second
 #define MAX_GRAIN_COUNT 64
@@ -33,9 +33,18 @@ dsy_gpio dc_pin;
 I2CHandle i2c;
 
 float DSY_SDRAM_BSS recording[RECORDING_BUFFER_SIZE];
+size_t recording_length = 0;
+size_t write_head = 0;
+
+const size_t RENDERABLE_RECORDING_BUFFER_SIZE = oled.width;
+const float RECORDING_TO_RENDERABLE_RECORDING_BUFFER_RATIO = RENDERABLE_RECORDING_BUFFER_SIZE / (float)RECORDING_BUFFER_SIZE;
+const float RENDERABLE_RECORDING_TO_RECORDING_BUFFER_RATIO = RECORDING_BUFFER_SIZE / (float)RENDERABLE_RECORDING_BUFFER_SIZE;
+float DSY_SDRAM_BSS renderable_recording[RENDERABLE_RECORDING_BUFFER_SIZE]; // Much lower resolution, for easy rendering
+size_t last_written_renderable_recording_index = 0; 
+size_t max_written_renderable_recording_index = 0; 
 
 bool is_recording = false;
-size_t recording_length = 0;
+
 size_t grain_length = 48000 / 5; 
 float grain_start_offset = 0.f;
 unsigned int spawn_rate = 48000 / 3; // samples
@@ -126,12 +135,15 @@ void AudioCallback(
         if (!is_recording) {
             is_recording = true;
             recording_length = 0;
+            write_head = 0;
+            last_written_renderable_recording_index = 0;
+            max_written_renderable_recording_index = 0;
+            memset(renderable_recording, 0, sizeof(renderable_recording));
         } else {
             is_recording = false;
         }
     }
 
-    // Set the led to 5V if the looper is recording
     patch.SetLed(is_recording || shift_button.Pressed()); 
 
     // Process audio
@@ -140,11 +152,28 @@ void AudioCallback(
         samples_seen++;
 
         if (is_recording) {
-            recording[recording_length] = IN_L[i];
-            recording_length++;
+            recording[write_head] = IN_L[i];
 
-            if (recording_length >= RECORDING_BUFFER_SIZE) {
-                is_recording = false;
+            // TODO: Record positive and negative values seperately
+            size_t renderable_recording_index = write_head * RECORDING_TO_RENDERABLE_RECORDING_BUFFER_RATIO;
+
+            // Clear out the element when we first start writing fresh values to it
+            if (write_head == 0 || renderable_recording_index > last_written_renderable_recording_index) {
+                renderable_recording[renderable_recording_index] = 0;
+            }
+
+            // Downsample the samples into renderable_recording_index by averaging them
+            renderable_recording[renderable_recording_index] += abs(IN_L[i]) / RENDERABLE_RECORDING_TO_RECORDING_BUFFER_RATIO;
+            last_written_renderable_recording_index = renderable_recording_index;
+            max_written_renderable_recording_index = std::max(max_written_renderable_recording_index, last_written_renderable_recording_index);
+            
+            if (recording_length < RECORDING_BUFFER_SIZE) {
+                recording_length++;
+            }
+            
+            write_head++;
+            if (write_head >= RECORDING_BUFFER_SIZE) {
+                write_head = 0;
             }
  
             OUT_L[i] = IN_L[i];
@@ -255,14 +284,37 @@ int main(void)
                 oled.clear(SSD1327_BLACK);
             }
 
-            // Grain start offset
-            float grain_start_offset_x = grain_start_offset / (float)recording_length * oled.height;
-            float grain_start_offset_x_decimal_part = modf(grain_start_offset_x);
-            uint8_t y_margin = (oled.width - (pan_spread * oled.width)) / 2;
+            // Recording Waveform
+            uint8_t last_amplitude = 0;
+            // Traversing backwards stops the leading wave of recording
+            // affecting values infront of it due to how the smoothing filter works
+            for (int x = oled.width - 1; x >= 0; x--) {
+                size_t renderable_recording_index = (x / (float)oled.width) * max_written_renderable_recording_index;
 
-            for (uint8_t y = y_margin; y < oled.width - y_margin; y++) {
+                uint8_t amplitude = std::min(128.f, renderable_recording[renderable_recording_index] / 0.1f * oled.height);
+
+                // Smooth out the waveform
+                // TODO: Smooth differently, this produces weird classic LPF shapes
+                if (x > 0) {
+                    amplitude = amplitude * 0.4 + last_amplitude * 0.6;
+                }
+                last_amplitude = amplitude;
+
+                uint8_t margin = (oled.height - amplitude) / 2;
+
+                for (uint8_t y = margin; y < oled.width - margin; y++) {
+                    oled.setPixel(x, y, 0x1);
+                }
+            }
+
+            // Grain start offset
+            float grain_start_offset_x = grain_start_offset / (float)recording_length * oled.width;
+            float grain_start_offset_x_decimal_part = modf(grain_start_offset_x);
+            uint8_t y_margin = (oled.height - pan_spread * oled.height) / 2;
+
+            for (uint8_t y = y_margin; y < oled.height - y_margin; y++) {
                 oled.setPixel(grain_start_offset_x, y, map_to_range(1 - grain_start_offset_x_decimal_part, 0x2, 0x6));
-                oled.setPixel(wrap(grain_start_offset_x + 1, 0, oled.height), y, map_to_range(grain_start_offset_x_decimal_part, 0x2, 0x6));
+                oled.setPixel(wrap(grain_start_offset_x + 1, 0, oled.width), y, map_to_range(grain_start_offset_x_decimal_part, 0x2, 0x6));
             }
 
             // Grains
@@ -270,11 +322,11 @@ int main(void)
                 Grain grain = grains[j];
 
                 if (grain.step <= grain.length) {
-                    uint8_t y = grain.pan * oled.width;
+                    uint8_t y = grain.pan * oled.height;
                     uint32_t current_offset = wrap(grain.start_offset + grain.step * grains[j].playback_speed, 0, recording_length);
-                    float x = (current_offset / (float)recording_length) * oled.height;
+                    float x = (current_offset / (float)recording_length) * oled.width;
 
-                    float amplitude = std::min((grains[j].length - grains[j].step), grains[j].step) / (float)grains[j].length;
+                    float amplitude = std::min((grains[j].length - grains[j].step), grains[j].step) / (float)grains[j].length;  
 
                     oled.setPixel(x, y, 0xF * amplitude);
                 }
@@ -287,9 +339,10 @@ int main(void)
             last_debug_print_millis = System::GetNow();
 
             // Note, this ignores any work done in this loop, eg running the OLED
-            patch.PrintLine("cpu Max:" FLT_FMT3 "\tAvg:" FLT_FMT3, FLT_VAR3(cpu_load_meter.GetMaxCpuLoad()), FLT_VAR3(cpu_load_meter.GetAvgCpuLoad()));
+            patch.PrintLine("cpu Max:x " FLT_FMT3 "\tAvg:" FLT_FMT3, FLT_VAR3(cpu_load_meter.GetMaxCpuLoad()), FLT_VAR3(cpu_load_meter.GetAvgCpuLoad()));
             // patch.PrintLine(FLT_FMT3, FLT_VAR3(round(map_to_range(patch.GetAdcValue(CV_7), -12, 12)) / 12));
             // patch.PrintLine("grain_start_offset: " FLT_FMT3, FLT_VAR3(grain_start_offset));
+            // patch.PrintLine("%d", last_written_renderable_recording_index);
         }
     }
 } 
