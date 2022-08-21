@@ -8,9 +8,9 @@ using namespace patch_sm;
 using namespace daisysp;
 
 #define RECORDING_XFADE_OVERLAP 100 // Samples
-#define RECORDING_BUFFER_SIZE (48000 * 10) // X seconds at 48kHz
+#define RECORDING_BUFFER_SIZE (48000 * 5) // X seconds at 48kHz
 #define MIN_GRAIN_SIZE 480 // 10 ms
-#define MAX_GRAIN_SIZE 48000 // 1 second
+#define MAX_GRAIN_SIZE (48000 * 2) // 2 second
 #define MAX_GRAIN_COUNT 64
 
 struct Grain {
@@ -95,6 +95,7 @@ float modf(float x) {
 float getSample(int index) {
     index = wrap(index, 0, recording_length);
 
+    // TODO: The pop-zone has moved. It now follows the record_head. This should too
     if (index < RECORDING_XFADE_OVERLAP) {
         float xfade_magnitude = 1 - (index + 1) / ((float)RECORDING_XFADE_OVERLAP + 1.f);
 
@@ -118,15 +119,16 @@ void AudioCallback(
     patch.ProcessAllControls();
     record_button.Debounce();
     shift_button.Debounce();
-
-    spawn_rate = map_to_range(1 - patch.GetAdcValue(CV_1), MIN_GRAIN_SIZE, MAX_GRAIN_SIZE);
+    
+    spawn_rate = map_to_range(1 - log10f(1 + patch.GetAdcValue(CV_1) * 9), MIN_GRAIN_SIZE, MAX_GRAIN_SIZE / 4);
     grain_length = map_to_range(patch.GetAdcValue(CV_2), MIN_GRAIN_SIZE, MAX_GRAIN_SIZE);
     float scan_speed = map_to_range(patch.GetAdcValue(CV_3), -2, 2);
     float grain_spread = patch.GetAdcValue(CV_4);
     pan_spread = patch.GetAdcValue(CV_5);
     float spawn_rate_spread = patch.GetAdcValue(CV_6);
     float modified_spawn_rate = spawn_rate * (1 + next_spawn_offset * spawn_rate_spread);
-    float pitch_shift_in_semitones = map_to_range(patch.GetAdcValue(CV_7), -12 * 5, 12 * 5); // volt per octave
+    // float pitch_shift_in_semitones = map_to_range(patch.GetAdcValue(CV_7), -12 * 5, 12 * 5); // volt per octave
+    float pitch_shift_in_semitones = (int)map_to_range(patch.GetAdcValue(CV_7), -12, 12); // Without CV this is more playable
     float pitch_shift_spread = patch.GetAdcValue(CV_8);
 
     // Toggle the record state on button press
@@ -175,14 +177,9 @@ void AudioCallback(
             if (write_head >= RECORDING_BUFFER_SIZE) {
                 write_head = 0;
             }
- 
-            OUT_L[i] = IN_L[i];
-            OUT_R[i] = OUT_L[i];
-        } else if (recording_length == 0) {
-            // Just pass through if there's no recording
-            OUT_L[i] = IN_L[i];
-            OUT_R[i] = OUT_L[i];
-        } else {
+        } 
+
+        if (recording_length > 4800 /* A kinda abitrary number */) {
             // Spawn grains
             // TODO: This will break when samples_seen wraps
             if (samples_seen - last_spawn_time >= modified_spawn_rate && !available_grains.IsEmpty()) {
@@ -235,7 +232,10 @@ void AudioCallback(
 
             OUT_L[i] = wet_l + IN_L[i];
             OUT_R[i] = wet_r + IN_L[i];
-        } 
+        } else {
+            OUT_L[i] = IN_L[i];
+            OUT_R[i] = IN_L[i];
+        }
     }
 
     grain_start_offset = fwrap(grain_start_offset + scan_speed * size, 0.f, recording_length);
@@ -339,9 +339,11 @@ int main(void)
             last_debug_print_millis = System::GetNow();
 
             // Note, this ignores any work done in this loop, eg running the OLED
-            patch.PrintLine("cpu Max:x " FLT_FMT3 "\tAvg:" FLT_FMT3, FLT_VAR3(cpu_load_meter.GetMaxCpuLoad()), FLT_VAR3(cpu_load_meter.GetAvgCpuLoad()));
+            // patch.PrintLine("cpu Max:x " FLT_FMT3 "\tAvg:" FLT_FMT3, FLT_VAR3(cpu_load_meter.GetMaxCpuLoad()), FLT_VAR3(cpu_load_meter.GetAvgCpuLoad()));
             // patch.PrintLine(FLT_FMT3, FLT_VAR3(round(map_to_range(patch.GetAdcValue(CV_7), -12, 12)) / 12));
-            // patch.PrintLine("grain_start_offset: " FLT_FMT3, FLT_VAR3(grain_start_offset));
+            patch.PrintLine(FLT_FMT3, FLT_VAR3(
+                1 - log10f(1 + patch.GetAdcValue(CV_1) * 9)
+            ));
             // patch.PrintLine("%d", last_written_renderable_recording_index);
         }
     }
