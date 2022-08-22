@@ -2,6 +2,7 @@
 #include "daisysp.h"
 #include "core_cm7.h"
 #include "Daisy_SSD1327/Daisy_SSD1327.h"
+#include "utils.h"
 
 using namespace daisy;
 using namespace patch_sm;
@@ -15,7 +16,7 @@ using namespace daisysp;
 
 struct Grain {
     size_t length = 0;
-    int start_offset = 0;
+    int spawn_position = 0;
     size_t step = 0;
     float pan = 0; // 0 is left, 1 is right
     float playback_speed = 0;
@@ -45,48 +46,21 @@ size_t max_written_renderable_recording_index = 0;
 
 bool is_recording = false;
 
-size_t grain_length = 48000 / 5; 
-float grain_start_offset = 0.f;
-unsigned int spawn_rate = 48000 / 3; // samples
-float spawn_rate_spread;
-float next_spawn_offset;
+float scan_speed;
+float grain_spread;
+float pitch_shift_in_semitones;
+float pitch_shift_spread;
+size_t grain_length;
 float pan_spread;
-uint32_t last_spawn_time = 0;
-uint32_t samples_seen = 0;
+unsigned int spawn_time; // The number of samples between each new grain
+float spawn_time_spread; // The variance of the spawn rate
+
+float grain_spawn_position = 0.f;
+float next_spawn_offset; 
+uint32_t samples_since_last_spawn = 0;
+
 Grain grains[MAX_GRAIN_COUNT];
 Stack<uint8_t, MAX_GRAIN_COUNT> available_grains;
-uint32_t cycles_used = 0;
-
-float fwrap(float x, float min, float max) {
-    if (max == min) return min;
-    if (min > max) return fwrap(x, max, min);
-
-    return (x >= 0 ? min : max) + fmodf(x, max - min);
-}
-
-int wrap(int x, int min, int max) {
-    if (max == min) return min;
-    if (min > max) return wrap(x, max, min);
-
-    return (x >= 0 ? min : max) + x % (max - min);
-}
-
-float lerp(float a, float b, float t) {
-    return a + t * (b - a);
-}
-
-float randF(float min, float max) {
-    return min + rand() * kRandFrac * (max - min);
-}
-
-float map_to_range(float fraction, float min, float max) {
-    return min + fraction * (max - min);
-}
-
-float modf(float x) {
-    static float junk;
-    return modf(x, &junk);
-}
 
 // Responsible for wrapping the index
 // and xfading the start and end of the track 
@@ -120,16 +94,19 @@ void AudioCallback(
     record_button.Debounce();
     shift_button.Debounce();
     
-    spawn_rate = map_to_range(1 - log10f(1 + patch.GetAdcValue(CV_1) * 9), MIN_GRAIN_SIZE, MAX_GRAIN_SIZE / 4);
+    scan_speed = map_to_range(patch.GetAdcValue(CV_4), -2, 2);
+    grain_spread = patch.GetAdcValue(CV_8);
+
+    // pitch_shift_in_semitones = map_to_range(patch.GetAdcValue(CV_7), -12 * 5, 12 * 5); // volt per octave
+    pitch_shift_in_semitones = (int)map_to_range(patch.GetAdcValue(CV_3), -12, 12); // Without CV this is more playable
+    pitch_shift_spread = patch.GetAdcValue(CV_7);
+
     grain_length = map_to_range(patch.GetAdcValue(CV_2), MIN_GRAIN_SIZE, MAX_GRAIN_SIZE);
-    float scan_speed = map_to_range(patch.GetAdcValue(CV_3), -2, 2);
-    float grain_spread = patch.GetAdcValue(CV_4);
-    pan_spread = patch.GetAdcValue(CV_5);
-    float spawn_rate_spread = patch.GetAdcValue(CV_6);
-    float modified_spawn_rate = spawn_rate * (1 + next_spawn_offset * spawn_rate_spread);
-    // float pitch_shift_in_semitones = map_to_range(patch.GetAdcValue(CV_7), -12 * 5, 12 * 5); // volt per octave
-    float pitch_shift_in_semitones = (int)map_to_range(patch.GetAdcValue(CV_7), -12, 12); // Without CV this is more playable
-    float pitch_shift_spread = patch.GetAdcValue(CV_8);
+    pan_spread = patch.GetAdcValue(CV_6);
+
+    spawn_time = map_to_range(1 - log10f(1 + patch.GetAdcValue(CV_1) * 9), MIN_GRAIN_SIZE, MAX_GRAIN_SIZE / 4);
+    spawn_time_spread = patch.GetAdcValue(CV_5);
+    float actual_spawn_time = spawn_time * (1 + next_spawn_offset * spawn_time_spread);
 
     // Toggle the record state on button press
     if(record_button.RisingEdge())
@@ -151,8 +128,6 @@ void AudioCallback(
     // Process audio
     for(size_t i = 0; i < size; i++)
     {
-        samples_seen++;
-
         if (is_recording) {
             recording[write_head] = IN_L[i];
 
@@ -180,24 +155,25 @@ void AudioCallback(
         } 
 
         if (recording_length > 4800 /* A kinda abitrary number */) {
+            samples_since_last_spawn++;
+
             // Spawn grains
-            // TODO: This will break when samples_seen wraps
-            if (samples_seen - last_spawn_time >= modified_spawn_rate && !available_grains.IsEmpty()) {
-                size_t next_grain_to_spawn = available_grains.PopBack();
+            if (samples_since_last_spawn >= actual_spawn_time && !available_grains.IsEmpty()) {
+                samples_since_last_spawn = 0;
 
-                last_spawn_time = samples_seen;
+                size_t new_grain_index = available_grains.PopBack();
 
-                grains[next_grain_to_spawn].length = grain_length;
-                grains[next_grain_to_spawn].start_offset = grain_start_offset + grain_spread * randF(-0.5f, 0.5f) * recording_length;
-                grains[next_grain_to_spawn].step = 0;
-                grains[next_grain_to_spawn].pan = 0.5f + randF(-0.5f, 0.5f) * pan_spread;
+                grains[new_grain_index].length = grain_length;
+                grains[new_grain_index].spawn_position = grain_spawn_position + grain_spread * randF(-0.5f, 0.5f) * recording_length;
+                grains[new_grain_index].step = 0;
+                grains[new_grain_index].pan = 0.5f + randF(-0.5f, 0.5f) * pan_spread;
 
                 float pitch_shift_offset_in_semitones = randF(-2.f, 2.f) * pitch_shift_spread;
                 float pitch_shift_in_octaves = (pitch_shift_in_semitones + pitch_shift_offset_in_semitones) / 12.f;
                 float playback_speed = pow(2, pitch_shift_in_octaves);
-                grains[next_grain_to_spawn].playback_speed = playback_speed;
+                grains[new_grain_index].playback_speed = playback_speed;
 
-                next_spawn_offset = randF(-1.f, 1.f);
+                next_spawn_offset = randF(-1.f, 1.f); // +/- 100%
             }
 
             // Calculate output
@@ -206,7 +182,7 @@ void AudioCallback(
 
             for (int j = 0; j < MAX_GRAIN_COUNT; j++) {
                 if (grains[j].step <= grains[j].length) {
-                    size_t buffer_index = grains[j].start_offset + grains[j].step * grains[j].playback_speed;
+                    size_t buffer_index = grains[j].spawn_position + grains[j].step * grains[j].playback_speed;
 
                     // playback_speed is a float so we need to interpolate between samples
                     float sample = getSample(buffer_index);
@@ -238,7 +214,7 @@ void AudioCallback(
         }
     }
 
-    grain_start_offset = fwrap(grain_start_offset + scan_speed * size, 0.f, recording_length);
+    grain_spawn_position = fwrap(grain_spawn_position + scan_speed * size, 0.f, recording_length);
 
     cpu_load_meter.OnBlockEnd();
 }
@@ -308,13 +284,13 @@ int main(void)
             }
 
             // Grain start offset
-            float grain_start_offset_x = grain_start_offset / (float)recording_length * oled.width;
-            float grain_start_offset_x_decimal_part = modf(grain_start_offset_x);
+            float grain_spawn_position_x = grain_spawn_position / (float)recording_length * oled.width;
+            float grain_spawn_position_x_decimal_part = modf(grain_spawn_position_x);
             uint8_t y_margin = (oled.height - pan_spread * oled.height) / 2;
 
             for (uint8_t y = y_margin; y < oled.height - y_margin; y++) {
-                oled.setPixel(grain_start_offset_x, y, map_to_range(1 - grain_start_offset_x_decimal_part, 0x2, 0x6));
-                oled.setPixel(wrap(grain_start_offset_x + 1, 0, oled.width), y, map_to_range(grain_start_offset_x_decimal_part, 0x2, 0x6));
+                oled.setPixel(grain_spawn_position_x, y, map_to_range(1 - grain_spawn_position_x_decimal_part, 0x2, 0x6));
+                oled.setPixel(wrap(grain_spawn_position_x + 1, 0, oled.width), y, map_to_range(grain_spawn_position_x_decimal_part, 0x2, 0x6));
             }
 
             // Grains
@@ -323,7 +299,7 @@ int main(void)
 
                 if (grain.step <= grain.length) {
                     uint8_t y = grain.pan * oled.height;
-                    uint32_t current_offset = wrap(grain.start_offset + grain.step * grains[j].playback_speed, 0, recording_length);
+                    uint32_t current_offset = wrap(grain.spawn_position + grain.step * grains[j].playback_speed, 0, recording_length);
                     float x = (current_offset / (float)recording_length) * oled.width;
 
                     float amplitude = std::min((grains[j].length - grains[j].step), grains[j].step) / (float)grains[j].length;  
@@ -339,11 +315,9 @@ int main(void)
             last_debug_print_millis = System::GetNow();
 
             // Note, this ignores any work done in this loop, eg running the OLED
-            // patch.PrintLine("cpu Max:x " FLT_FMT3 "\tAvg:" FLT_FMT3, FLT_VAR3(cpu_load_meter.GetMaxCpuLoad()), FLT_VAR3(cpu_load_meter.GetAvgCpuLoad()));
+            patch.PrintLine("cpu Max:x " FLT_FMT3 "\tAvg:" FLT_FMT3, FLT_VAR3(cpu_load_meter.GetMaxCpuLoad()), FLT_VAR3(cpu_load_meter.GetAvgCpuLoad()));
             // patch.PrintLine(FLT_FMT3, FLT_VAR3(round(map_to_range(patch.GetAdcValue(CV_7), -12, 12)) / 12));
-            patch.PrintLine(FLT_FMT3, FLT_VAR3(
-                1 - log10f(1 + patch.GetAdcValue(CV_1) * 9)
-            ));
+            // patch.PrintLine(FLT_FMT3, FLT_VAR3(patch.GetAdcValue(CV_8)));
             // patch.PrintLine("%d", last_written_renderable_recording_index);
         }
     }
