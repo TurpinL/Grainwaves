@@ -46,8 +46,9 @@ size_t max_written_renderable_recording_index = 0;
 
 bool is_recording = false;
 
-float scan_speed;
-float grain_spread;
+float spawn_position_scan_speed;
+float spawn_position_offset;
+float spawn_position_spread;
 float pitch_shift_in_semitones;
 float pitch_shift_spread;
 size_t grain_length;
@@ -55,7 +56,8 @@ float pan_spread;
 unsigned int spawn_time; // The number of samples between each new grain
 float spawn_time_spread; // The variance of the spawn rate
 
-float grain_spawn_position = 0.f;
+float spawn_position_scan_offset = 0.f;
+float spawn_position = 0.f;
 float next_spawn_offset; 
 uint32_t samples_since_last_spawn = 0;
 
@@ -94,12 +96,23 @@ void AudioCallback(
     record_button.Debounce();
     shift_button.Debounce();
     
-    scan_speed = map_to_range(patch.GetAdcValue(CV_4), -2, 2);
-    grain_spread = patch.GetAdcValue(CV_8);
+    spawn_position_scan_speed = map_to_range(patch.GetAdcValue(CV_4), -2, 2);
+
+    // Magnetize to 0x and 1x spawn_position_scan_speed
+    // TODO: make it so you can smoothly transition in and out of these fixed values
+    if (spawn_position_scan_speed > -0.1 && spawn_position_scan_speed < 0.1) {
+        spawn_position_scan_speed = 0;
+    } else if (spawn_position_scan_speed > 0.85 && spawn_position_scan_speed < 1.15) {
+        spawn_position_scan_speed = 1;
+    }
+
+    spawn_position_offset = patch.GetAdcValue(CV_8) * recording_length;
+    spawn_position_spread = patch.GetAdcValue(CV_7);
+    spawn_position = fwrap(spawn_position_offset + spawn_position_scan_offset, 0.f, recording_length);
 
     // pitch_shift_in_semitones = map_to_range(patch.GetAdcValue(CV_7), -12 * 5, 12 * 5); // volt per octave
     pitch_shift_in_semitones = (int)map_to_range(patch.GetAdcValue(CV_3), -12, 12); // Without CV this is more playable
-    pitch_shift_spread = patch.GetAdcValue(CV_7);
+    pitch_shift_spread = 0;//patch.GetAdcValue(CV_7);
 
     grain_length = map_to_range(patch.GetAdcValue(CV_2), MIN_GRAIN_SIZE, MAX_GRAIN_SIZE);
     pan_spread = patch.GetAdcValue(CV_6);
@@ -164,7 +177,7 @@ void AudioCallback(
                 size_t new_grain_index = available_grains.PopBack();
 
                 grains[new_grain_index].length = grain_length;
-                grains[new_grain_index].spawn_position = grain_spawn_position + grain_spread * randF(-0.5f, 0.5f) * recording_length;
+                grains[new_grain_index].spawn_position = spawn_position + spawn_position_spread * randF(-0.5f, 0.5f) * recording_length;
                 grains[new_grain_index].step = 0;
                 grains[new_grain_index].pan = 0.5f + randF(-0.5f, 0.5f) * pan_spread;
 
@@ -214,7 +227,7 @@ void AudioCallback(
         }
     }
 
-    grain_spawn_position = fwrap(grain_spawn_position + scan_speed * size, 0.f, recording_length);
+    spawn_position_scan_offset = fwrap(spawn_position_scan_offset + spawn_position_scan_speed * size, 0.f, recording_length);
 
     cpu_load_meter.OnBlockEnd();
 }
@@ -284,13 +297,13 @@ int main(void)
             }
 
             // Grain start offset
-            float grain_spawn_position_x = grain_spawn_position / (float)recording_length * oled.width;
-            float grain_spawn_position_x_decimal_part = modf(grain_spawn_position_x);
+            float spawn_position_x = spawn_position / (float)recording_length * oled.width;
+            float spawn_position_x_decimal_part = modf(spawn_position_x);
             uint8_t y_margin = (oled.height - pan_spread * oled.height) / 2;
 
             for (uint8_t y = y_margin; y < oled.height - y_margin; y++) {
-                oled.setPixel(grain_spawn_position_x, y, map_to_range(1 - grain_spawn_position_x_decimal_part, 0x2, 0x6));
-                oled.setPixel(wrap(grain_spawn_position_x + 1, 0, oled.width), y, map_to_range(grain_spawn_position_x_decimal_part, 0x2, 0x6));
+                oled.setPixel(spawn_position_x, y, map_to_range(1 - spawn_position_x_decimal_part, 0x2, 0x6));
+                oled.setPixel(wrap(spawn_position_x + 1, 0, oled.width), y, map_to_range(spawn_position_x_decimal_part, 0x2, 0x6));
             }
 
             // Grains
