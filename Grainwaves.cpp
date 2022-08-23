@@ -72,13 +72,14 @@ Stack<uint8_t, MAX_GRAIN_COUNT> available_grains;
 float getSample(int index) {
     index = wrap(index, 0, recording_length);
 
-    // TODO: The pop-zone has moved. It now follows the record_head. This should too
-    if (index < RECORDING_XFADE_OVERLAP) {
-        float xfade_magnitude = 1 - (index + 1) / ((float)RECORDING_XFADE_OVERLAP + 1.f);
+    int distance_from_write_head_to_index = wrap(index - write_head, 0, recording_length);
+
+    if (distance_from_write_head_to_index < RECORDING_XFADE_OVERLAP) {
+        float xfade_magnitude = 1 - (distance_from_write_head_to_index + 1) / ((float)RECORDING_XFADE_OVERLAP + 1.f);
 
         return lerp(
             recording[index], 
-            recording[recording_length - 1], 
+            recording[write_head - 1], 
             xfade_magnitude
         );
     } else {
@@ -98,21 +99,17 @@ void AudioCallback(
     shift_button.Debounce();
     
     spawn_position_scan_speed = map_to_range(patch.GetAdcValue(CV_4), -2, 2);
-
-    // Magnetize to 0x and 1x spawn_position_scan_speed
-    // TODO: make it so you can smoothly transition in and out of these fixed values
-    if (spawn_position_scan_speed > -0.1 && spawn_position_scan_speed < 0.1) {
-        spawn_position_scan_speed = 0;
-    } else if (spawn_position_scan_speed > 0.85 && spawn_position_scan_speed < 1.15) {
+    // Magnetize 1x spawn_position_scan_speed, so you can match the recording speed
+    if (spawn_position_scan_speed > 0.85 && spawn_position_scan_speed < 1.15) {
         spawn_position_scan_speed = 1;
     }
 
-        spawn_position_offset = patch.GetAdcValue(CV_8) * recording_length;
+    spawn_position_offset = patch.GetAdcValue(CV_8) * recording_length;
     spawn_position_spread = patch.GetAdcValue(CV_7);
     spawn_position = fwrap(spawn_position_offset + spawn_position_scan_offset, 0.f, recording_length);
 
     // pitch_shift_in_semitones = map_to_range(patch.GetAdcValue(CV_7), -12 * 5, 12 * 5); // volt per octave
-    pitch_shift_in_semitones = (int)map_to_range(patch.GetAdcValue(CV_3), -12, 12); // Without CV this is more playable
+    pitch_shift_in_semitones = map_to_range(patch.GetAdcValue(CV_3), -12, 12); // Without CV this is more playable
     pitch_shift_spread = 0;//patch.GetAdcValue(CV_7);
 
     grain_length = map_to_range(patch.GetAdcValue(CV_2), MIN_GRAIN_SIZE, MAX_GRAIN_SIZE);
