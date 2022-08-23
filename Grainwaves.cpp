@@ -18,7 +18,7 @@ struct Grain {
     size_t length = 0;
     int spawn_position = 0;
     size_t step = 0;
-    float pan = 0; // 0 is left, 1 is right
+    float pan = 0; // 0 is left, 1 is right.
     float playback_speed = 0;
 };
 
@@ -53,6 +53,7 @@ float pitch_shift_in_semitones;
 float pitch_shift_spread;
 size_t grain_length;
 float pan_spread;
+float wet_dry_balance; // 0 - all wet, 1 - all dry, 0.5 - all wet and dry
 unsigned int spawn_time; // The number of samples between each new grain
 float spawn_time_spread; // The variance of the spawn rate
 
@@ -106,7 +107,7 @@ void AudioCallback(
         spawn_position_scan_speed = 1;
     }
 
-    spawn_position_offset = patch.GetAdcValue(CV_8) * recording_length;
+        spawn_position_offset = patch.GetAdcValue(CV_8) * recording_length;
     spawn_position_spread = patch.GetAdcValue(CV_7);
     spawn_position = fwrap(spawn_position_offset + spawn_position_scan_offset, 0.f, recording_length);
 
@@ -115,7 +116,8 @@ void AudioCallback(
     pitch_shift_spread = 0;//patch.GetAdcValue(CV_7);
 
     grain_length = map_to_range(patch.GetAdcValue(CV_2), MIN_GRAIN_SIZE, MAX_GRAIN_SIZE);
-    pan_spread = patch.GetAdcValue(CV_6);
+    pan_spread = 1; // patch.GetAdcValue(CV_6);
+    wet_dry_balance = patch.GetAdcValue(CV_6);
 
     spawn_time = map_to_range(1 - log10f(1 + patch.GetAdcValue(CV_1) * 9), MIN_GRAIN_SIZE, MAX_GRAIN_SIZE / 4);
     spawn_time_spread = patch.GetAdcValue(CV_5);
@@ -206,8 +208,7 @@ void AudioCallback(
 
                     // hacky bad envelope
                     float envelope_mult = std::min((grains[j].length - grains[j].step), grains[j].step);
-                    // TODO: Get rid of this 0.75f and balance the output properly
-                    float signal = interpolated_sample * envelope_mult / grains[j].length * 0.75f;
+                    float signal = interpolated_sample * envelope_mult / grains[j].length;
                     wet_l += (1.f - grains[j].pan) * signal;
                     wet_r += grains[j].pan * signal;
 
@@ -219,11 +220,16 @@ void AudioCallback(
                 }
             }
 
-            OUT_L[i] = wet_l + IN_L[i];
-            OUT_R[i] = wet_r + IN_L[i];
+            float dry_level = std::min(wet_dry_balance, 0.5f) * 2;
+            float wet_level = std::min(1 - wet_dry_balance, 0.5f) * 2;
+
+            OUT_L[i] = wet_l * wet_level + IN_L[i] * dry_level;
+            OUT_R[i] = wet_r * wet_level + IN_L[i] * dry_level;
         } else {
-            OUT_L[i] = IN_L[i];
-            OUT_R[i] = IN_L[i];
+            float dry_level = std::min(wet_dry_balance, 0.5f) * 2;
+
+            OUT_L[i] = IN_L[i] * dry_level;
+            OUT_R[i] = IN_L[i] * dry_level;
         }
     }
 
@@ -302,8 +308,8 @@ int main(void)
             uint8_t y_margin = (oled.height - pan_spread * oled.height) / 2;
 
             for (uint8_t y = y_margin; y < oled.height - y_margin; y++) {
-                oled.setPixel(spawn_position_x, y, map_to_range(1 - spawn_position_x_decimal_part, 0x2, 0x6));
-                oled.setPixel(wrap(spawn_position_x + 1, 0, oled.width), y, map_to_range(spawn_position_x_decimal_part, 0x2, 0x6));
+                oled.setPixel(spawn_position_x, y, map_to_range(1 - spawn_position_x_decimal_part, 0x1, 0x3));
+                oled.setPixel(wrap(spawn_position_x + 1, 0, oled.width), y, map_to_range(spawn_position_x_decimal_part, 0x1, 0x3));
             }
 
             // Grains
