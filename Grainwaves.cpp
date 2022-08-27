@@ -295,18 +295,23 @@ int main(void)
                 uint8_t margin = (oled.height - amplitude) / 2;
 
                 for (uint8_t y = margin; y < oled.width - margin; y++) {
-                    oled.setPixel(x, y, 0x1);
+                    if (is_recording && renderable_recording_index == last_written_renderable_recording_index) {
+                        oled.setPixel(x, y, 0x4);
+                    } else {    
+                        oled.setPixel(x, y, 0x1);
+                    }
                 }
             }
 
             // Grain start offset
             float spawn_position_x = spawn_position / (float)recording_length * oled.width;
             float spawn_position_x_decimal_part = modf(spawn_position_x);
+
             uint8_t y_margin = (oled.height - pan_spread * oled.height) / 2;
 
             for (uint8_t y = y_margin; y < oled.height - y_margin; y++) {
-                oled.setPixel(spawn_position_x, y, map_to_range(1 - spawn_position_x_decimal_part, 0x1, 0x3));
-                oled.setPixel(wrap(spawn_position_x + 1, 0, oled.width), y, map_to_range(spawn_position_x_decimal_part, 0x1, 0x3));
+                oled.setPixel(spawn_position_x, y, map_to_range(1 - spawn_position_x_decimal_part, 0x0, 0x4));
+                oled.setPixel(wrap(spawn_position_x + 1, 0, oled.width), y, map_to_range(spawn_position_x_decimal_part, 0x0, 0x4));
             }
 
             // Grains
@@ -316,11 +321,13 @@ int main(void)
                 if (grain.step <= grain.length) {
                     uint8_t y = grain.pan * oled.height;
                     uint32_t current_offset = wrap(grain.spawn_position + grain.step * grains[j].playback_speed, 0, recording_length);
-                    float x = (current_offset / (float)recording_length) * oled.width;
+                    uint8_t x = (current_offset / (float)recording_length) * oled.width;
 
                     float amplitude = std::min((grains[j].length - grains[j].step), grains[j].step) / (float)grains[j].length;  
 
-                    oled.setPixel(x, y, 0xF * amplitude);
+                    oled.setPixel(x, y, 0xA * amplitude);
+                    oled.setPixel((x + 1) % oled.width, y, 0xF * amplitude);
+                    oled.setPixel((x + 2) % oled.width, y, 0xA * amplitude);
                 }
             }
 
