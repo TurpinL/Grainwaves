@@ -13,6 +13,7 @@ using namespace daisysp;
 #define MIN_GRAIN_SIZE 480 // 10 ms
 #define MAX_GRAIN_SIZE (48000 * 2) // 2 second
 #define MAX_GRAIN_COUNT 64
+#define SHOW_PERFORMANCE_BARS true
 
 struct Grain {
     size_t length = 0;
@@ -331,6 +332,36 @@ int main(void)
                 }
             }
 
+            if (SHOW_PERFORMANCE_BARS) {
+                // CPU Usage
+                uint8_t x_max_cpu_load = cpu_load_meter.GetMaxCpuLoad() * oled.width;
+                uint8_t x_avg_cpu_load = cpu_load_meter.GetAvgCpuLoad() * oled.width;
+                for (int x = 0; x < oled.width; x++) {
+                    if (x == x_max_cpu_load) {
+                        oled.setPixel(x, 0, 0xF);
+                        oled.setPixel(x, 1, 0xF);
+                    } else if (x <= x_avg_cpu_load) {
+                        oled.setPixel(x, 0, 0xA);
+                        oled.setPixel(x, 1, 0xA);
+                    } else {
+                        oled.setPixel(x, 0, 0x0);
+                        oled.setPixel(x, 1, 0x0);
+                    }
+                }
+
+                // Grain count
+                uint8_t alive_grains_x = (MAX_GRAIN_COUNT - available_grains.GetNumElements()) / (float)MAX_GRAIN_COUNT * oled.width;
+                for (int x = 0; x < oled.width; x++) {
+                    if (x <= alive_grains_x) {
+                        oled.setPixel(x, 3, 0xA);
+                        oled.setPixel(x, 4, 0xA);
+                    } else {
+                        oled.setPixel(x, 3, 0x0);
+                        oled.setPixel(x, 4, 0x0);
+                    }
+                }
+            }
+
             oled.display();
         }
 
@@ -338,7 +369,7 @@ int main(void)
             last_debug_print_millis = System::GetNow();
 
             // Note, this ignores any work done in this loop, eg running the OLED
-            patch.PrintLine("cpu Max:x " FLT_FMT3 "\tAvg:" FLT_FMT3, FLT_VAR3(cpu_load_meter.GetMaxCpuLoad()), FLT_VAR3(cpu_load_meter.GetAvgCpuLoad()));
+            patch.PrintLine("cpu Max: " FLT_FMT3 " Avg:" FLT_FMT3, FLT_VAR3(cpu_load_meter.GetMaxCpuLoad()), FLT_VAR3(cpu_load_meter.GetAvgCpuLoad()));
             // patch.PrintLine(FLT_FMT3, FLT_VAR3(round(map_to_range(patch.GetAdcValue(CV_7), -12, 12)) / 12));
             // patch.PrintLine(FLT_FMT3, FLT_VAR3(patch.GetAdcValue(CV_8)));
             // patch.PrintLine("%d", last_written_renderable_recording_index);
