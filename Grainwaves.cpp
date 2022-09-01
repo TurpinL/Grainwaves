@@ -12,7 +12,7 @@ using namespace daisysp;
 #define RECORDING_BUFFER_SIZE (48000 * 5) // X seconds at 48kHz
 #define MIN_GRAIN_SIZE 480 // 10 ms
 #define MAX_GRAIN_SIZE (48000 * 2) // 2 second
-#define MAX_GRAIN_COUNT 64
+#define MAX_GRAIN_COUNT 48
 #define SHOW_PERFORMANCE_BARS true
 
 struct Grain {
@@ -35,7 +35,7 @@ dsy_gpio dc_pin;
 I2CHandle i2c;
 
 float DSY_SDRAM_BSS recording[RECORDING_BUFFER_SIZE];
-size_t recording_length = 0;
+size_t recording_length = RECORDING_BUFFER_SIZE;
 size_t write_head = 0;
 
 const size_t RENDERABLE_RECORDING_BUFFER_SIZE = oled.width;
@@ -43,7 +43,6 @@ const float RECORDING_TO_RENDERABLE_RECORDING_BUFFER_RATIO = RENDERABLE_RECORDIN
 const float RENDERABLE_RECORDING_TO_RECORDING_BUFFER_RATIO = RECORDING_BUFFER_SIZE / (float)RENDERABLE_RECORDING_BUFFER_SIZE;
 float DSY_SDRAM_BSS renderable_recording[RENDERABLE_RECORDING_BUFFER_SIZE]; // Much lower resolution, for easy rendering
 size_t last_written_renderable_recording_index = 0; 
-size_t max_written_renderable_recording_index = 0; 
 
 bool is_recording = false;
 
@@ -117,8 +116,8 @@ void AudioCallback(
     pan_spread = 1; // patch.GetAdcValue(CV_6);
     wet_dry_balance = patch.GetAdcValue(CV_6);
 
-    spawn_time = map_to_range(1 - log10f(1 + patch.GetAdcValue(CV_1) * 9), MIN_GRAIN_SIZE, MAX_GRAIN_SIZE / 4);
-    spawn_time_spread = patch.GetAdcValue(CV_5);
+    spawn_time = map_to_range(1 - log10f(1 + patch.GetAdcValue(CV_1) * 9), 0, MAX_GRAIN_SIZE / 4);
+    spawn_time_spread = patch.GetAdcValue(CV_5);  
     float actual_spawn_time = spawn_time * (1 + next_spawn_offset * spawn_time_spread);
 
     // Toggle the record state on button press
@@ -126,11 +125,6 @@ void AudioCallback(
     {
         if (!is_recording) {
             is_recording = true;
-            recording_length = 0;
-            write_head = 0;
-            last_written_renderable_recording_index = 0;
-            max_written_renderable_recording_index = 0;
-            memset(renderable_recording, 0, sizeof(renderable_recording));
         } else {
             is_recording = false;
         }
@@ -155,7 +149,6 @@ void AudioCallback(
             // Downsample the samples into renderable_recording_index by averaging them
             renderable_recording[renderable_recording_index] += abs(IN_L[i]) / RENDERABLE_RECORDING_TO_RECORDING_BUFFER_RATIO;
             last_written_renderable_recording_index = renderable_recording_index;
-            max_written_renderable_recording_index = std::max(max_written_renderable_recording_index, last_written_renderable_recording_index);
             
             if (recording_length < RECORDING_BUFFER_SIZE) {
                 recording_length++;
@@ -265,6 +258,10 @@ int main(void)
         available_grains.PushBack(i);
     }
 
+    // Clear the buffers
+    memset(renderable_recording, 0, sizeof(renderable_recording));
+    memset(recording, 0, sizeof(recording));
+
     cpu_load_meter.Init(patch.AudioSampleRate(), patch.AudioBlockSize());
     patch.StartAudio(AudioCallback);
 
@@ -283,7 +280,7 @@ int main(void)
             // Traversing backwards stops the leading wave of recording
             // affecting values infront of it due to how the smoothing filter works
             for (int x = oled.width - 1; x >= 0; x--) {
-                size_t renderable_recording_index = (x / (float)oled.width) * max_written_renderable_recording_index;
+                size_t renderable_recording_index = (x / (float)oled.width) * RENDERABLE_RECORDING_BUFFER_SIZE;
 
                 uint8_t amplitude = std::min(128.f, renderable_recording[renderable_recording_index] / 0.1f * oled.height);
 
@@ -370,10 +367,10 @@ int main(void)
             last_debug_print_millis = System::GetNow();
 
             // Note, this ignores any work done in this loop, eg running the OLED
-            patch.PrintLine("cpu Max: " FLT_FMT3 " Avg:" FLT_FMT3, FLT_VAR3(cpu_load_meter.GetMaxCpuLoad()), FLT_VAR3(cpu_load_meter.GetAvgCpuLoad()));
+            // patch.PrintLine("cpu Max: " FLT_FMT3 " Avg:" FLT_FMT3, FLT_VAR3(cpu_load_meter.GetMaxCpuLoad()), FLT_VAR3(cpu_load_meter.GetAvgCpuLoad()));
             // patch.PrintLine(FLT_FMT3, FLT_VAR3(round(map_to_range(patch.GetAdcValue(CV_7), -12, 12)) / 12));
             // patch.PrintLine(FLT_FMT3, FLT_VAR3(patch.GetAdcValue(CV_8)));
-            // patch.PrintLine("%d", last_written_renderable_recording_index);
+            patch.PrintLine("%d", spawn_time);
         }
     }
 } 
