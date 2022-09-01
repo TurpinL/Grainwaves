@@ -49,6 +49,8 @@ bool is_recording = false;
 float spawn_position_scan_speed;
 float spawn_position_offset;
 float spawn_position_spread;
+float spawn_positions_splay;
+float spawn_positions_count;
 float pitch_shift_in_semitones;
 float pitch_shift_spread;
 size_t grain_length;
@@ -57,6 +59,7 @@ float wet_dry_balance; // 0 - all wet, 1 - all dry, 0.5 - all wet and dry
 unsigned int spawn_time; // The number of samples between each new grain
 float spawn_time_spread; // The variance of the spawn rate
 
+int next_spawn_position_index = 0;
 float spawn_position_scan_offset = 0.f;
 float spawn_position = 0.f;
 float next_spawn_offset; 
@@ -69,7 +72,7 @@ Stack<uint8_t, MAX_GRAIN_COUNT> available_grains;
 // and xfading the start and end of the track 
 // to get rid of the pop when transitioning from 
 // the last to the first sample of the recording
-inline float getSample(int index) {
+inline float get_sample(int index) {
     index = wrap(index, 0, recording_length);
 
     int distance_from_write_head_to_index = wrap(index - write_head, 0, recording_length);
@@ -87,6 +90,18 @@ inline float getSample(int index) {
     }
 }
 
+inline size_t get_spawn_position(int index) {
+    int unwrapped_spawn_position = spawn_position_scan_offset + spawn_position_offset;
+                    
+    if (index == (int)spawn_positions_count - 1) {
+        unwrapped_spawn_position += spawn_positions_splay;
+    } else if (index != 0) {
+        unwrapped_spawn_position += spawn_positions_splay - index * (spawn_positions_splay / (spawn_positions_count - 2));
+    }
+    
+    return fwrap(unwrapped_spawn_position, 0.f, recording_length);
+}
+
 void AudioCallback(
     AudioHandle::InputBuffer  in,
     AudioHandle::OutputBuffer out,
@@ -99,25 +114,36 @@ void AudioCallback(
     shift_button.Debounce();
     
     spawn_position_scan_speed = map_to_range(patch.GetAdcValue(CV_4), -2, 2);
-    // Magnetize 1x spawn_position_scan_speed, so you can match the recording speed
+    // Deadzone so you can match the recording speed
     if (spawn_position_scan_speed > 0.85 && spawn_position_scan_speed < 1.15) {
         spawn_position_scan_speed = 1;
     }
 
     spawn_position_offset = patch.GetAdcValue(CV_8) * recording_length;
-    spawn_position_spread = patch.GetAdcValue(CV_7);
-    spawn_position = fwrap(spawn_position_offset + spawn_position_scan_offset, 0.f, recording_length);
+    spawn_position_spread = 0.f; //patch.GetAdcValue(CV_7);
+    spawn_positions_count = 2.9f + map_to_range(patch.GetAdcValue(CV_6), 0, 5);
+
+    // Deadzone at 0 to the spawn position splay
+    float raw_spawn_pos_splay = map_to_range(patch.GetAdcValue(CV_7), -1, 1);
+    if (raw_spawn_pos_splay < -0.05f) {
+        raw_spawn_pos_splay = raw_spawn_pos_splay + 0.05f;
+    } else if (raw_spawn_pos_splay > 0.05f) {
+        raw_spawn_pos_splay = raw_spawn_pos_splay - 0.05f;
+    } else {
+        raw_spawn_pos_splay = 0;
+    }
+    spawn_positions_splay = raw_spawn_pos_splay * recording_length;
 
     // pitch_shift_in_semitones = map_to_range(patch.GetAdcValue(CV_7), -12 * 5, 12 * 5); // volt per octave
-    pitch_shift_in_semitones = map_to_range(patch.GetAdcValue(CV_3), -12, 12); // Without CV this is more playable
+    pitch_shift_in_semitones = map_to_range(patch.GetAdcValue(CV_3), -24, 24); // Without CV this is more playable
     pitch_shift_spread = 0;//patch.GetAdcValue(CV_7);
 
     grain_length = map_to_range(patch.GetAdcValue(CV_2), MIN_GRAIN_SIZE, MAX_GRAIN_SIZE);
     pan_spread = 1; // patch.GetAdcValue(CV_6);
-    wet_dry_balance = patch.GetAdcValue(CV_6);
+    wet_dry_balance = patch.GetAdcValue(CV_5);
 
     spawn_time = map_to_range(1 - log10f(1 + patch.GetAdcValue(CV_1) * 9), 0, MAX_GRAIN_SIZE / 4);
-    spawn_time_spread = patch.GetAdcValue(CV_5);  
+    spawn_time_spread = 0.f; // patch.GetAdcValue(CV_5);  
     float actual_spawn_time = spawn_time * (1 + next_spawn_offset * spawn_time_spread);
 
     // Toggle the record state on button press
@@ -170,16 +196,18 @@ void AudioCallback(
                 size_t new_grain_index = available_grains.PopBack();
 
                 grains[new_grain_index].length = grain_length;
-                grains[new_grain_index].spawn_position = spawn_position + spawn_position_spread * randF(-0.5f, 0.5f) * recording_length;
                 grains[new_grain_index].step = 0;
                 grains[new_grain_index].pan = 0.5f + randF(-0.5f, 0.5f) * pan_spread;
-
+                
+                grains[new_grain_index].spawn_position = get_spawn_position(next_spawn_position_index) + spawn_position_spread * randF(-0.5f, 0.5f) * recording_length;
+            
                 float pitch_shift_offset_in_semitones = randF(-2.f, 2.f) * pitch_shift_spread;
                 float pitch_shift_in_octaves = (pitch_shift_in_semitones + pitch_shift_offset_in_semitones) / 12.f;
                 float playback_speed = pow(2, pitch_shift_in_octaves);
                 grains[new_grain_index].playback_speed = playback_speed;
 
                 next_spawn_offset = randF(-1.f, 1.f); // +/- 100%
+                next_spawn_position_index = wrap(next_spawn_position_index + 1, 0, (int)spawn_positions_count);
             }
 
             // Calculate output
@@ -191,8 +219,8 @@ void AudioCallback(
                     size_t buffer_index = grains[j].spawn_position + grains[j].step * grains[j].playback_speed;
 
                     // playback_speed is a float so we need to interpolate between samples
-                    float sample = getSample(buffer_index);
-                    float next_sample = getSample(buffer_index + 1);
+                    float sample = get_sample(buffer_index);
+                    float next_sample = get_sample(buffer_index + 1);
 
                     float decimal_portion = modf(grains[j].step * grains[j].playback_speed);
                     float interpolated_sample = sample * (1 - decimal_portion) + next_sample * decimal_portion;
@@ -303,14 +331,23 @@ int main(void)
             }
 
             // Grain start offset
-            float spawn_position_x = spawn_position / (float)recording_length * oled.width;
-            float spawn_position_x_decimal_part = modf(spawn_position_x);
-
             uint8_t y_margin = (oled.height - pan_spread * oled.height) / 2;
 
-            for (uint8_t y = y_margin; y < oled.height - y_margin; y++) {
-                oled.setPixel(spawn_position_x, y, map_to_range(1 - spawn_position_x_decimal_part, 0x0, 0x4));
-                oled.setPixel(wrap(spawn_position_x + 1, 0, oled.width), y, map_to_range(spawn_position_x_decimal_part, 0x0, 0x4));
+            for (int i = 0; i < (int)spawn_positions_count; i++) {
+                float spawn_position_x = get_spawn_position(i) / (float)recording_length * oled.width;
+                float spawn_position_x_decimal_part = modf(spawn_position_x);
+
+                if (i == 0) {
+                    for (uint8_t y = y_margin; y < oled.height - y_margin; y++) {
+                        oled.setPixel(spawn_position_x, y, map_to_range(1 - spawn_position_x_decimal_part, 0x1, 0x5));
+                        oled.setPixel(wrap(spawn_position_x + 1, 0, oled.width), y, map_to_range(spawn_position_x_decimal_part, 0x1, 0x5));
+                    }
+                } else {
+                    for (uint8_t y = y_margin; y < oled.height - y_margin; y++) {
+                        oled.setPixel(spawn_position_x, y, map_to_range(1 - spawn_position_x_decimal_part, 0x1, 0x3));
+                        oled.setPixel(wrap(spawn_position_x + 1, 0, oled.width), y, map_to_range(spawn_position_x_decimal_part, 0x1, 0x3));
+                    }
+                }
             }
 
             // Grains
