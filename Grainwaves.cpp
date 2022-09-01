@@ -70,7 +70,7 @@ Stack<uint8_t, MAX_GRAIN_COUNT> available_grains;
 // and xfading the start and end of the track 
 // to get rid of the pop when transitioning from 
 // the last to the first sample of the recording
-float getSample(int index) {
+inline float getSample(int index) {
     index = wrap(index, 0, recording_length);
 
     int distance_from_write_head_to_index = wrap(index - write_head, 0, recording_length);
@@ -207,6 +207,7 @@ void AudioCallback(
                     // hacky bad envelope
                     float envelope_mult = std::min((grains[j].length - grains[j].step), grains[j].step);
                     float signal = interpolated_sample * envelope_mult / grains[j].length;
+
                     wet_l += (1.f - grains[j].pan) * signal;
                     wet_r += grains[j].pan * signal;
 
