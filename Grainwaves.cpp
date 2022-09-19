@@ -3,6 +3,7 @@
 #include "core_cm7.h"
 #include "Daisy_SSD1327/Daisy_SSD1327.h"
 #include "utils.h"
+#include "bitmaps.h"
 
 using namespace daisy;
 using namespace patch_sm;
@@ -44,7 +45,8 @@ const float RENDERABLE_RECORDING_TO_RECORDING_BUFFER_RATIO = RECORDING_BUFFER_SI
 float DSY_SDRAM_BSS renderable_recording[RENDERABLE_RECORDING_BUFFER_SIZE]; // Much lower resolution, for easy rendering
 size_t last_written_renderable_recording_index = 0; 
 
-bool is_recording = false;
+bool is_recording = true;
+bool is_tracking = true;
 
 float spawn_position_scan_speed;
 float spawn_position_offset;
@@ -60,7 +62,6 @@ unsigned int spawn_time; // The number of samples between each new grain
 float spawn_time_spread; // The variance of the spawn rate
 
 int next_spawn_position_index = 0;
-float spawn_position_scan_offset = 0.f;
 float spawn_position = 0.f;
 float next_spawn_offset; 
 uint32_t samples_since_last_spawn = 0;
@@ -91,7 +92,13 @@ inline float get_sample(int index) {
 }
 
 inline size_t get_spawn_position(int index) {
-    int unwrapped_spawn_position = spawn_position_scan_offset + spawn_position_offset;
+    int unwrapped_spawn_position;
+    
+    if (is_tracking) {
+        unwrapped_spawn_position = write_head + (spawn_position_offset - (recording_length / 2));
+    } else {
+        unwrapped_spawn_position = spawn_position_offset;
+    }
                     
     if (index == (int)spawn_positions_count - 1) {
         unwrapped_spawn_position += spawn_positions_splay;
@@ -112,12 +119,6 @@ void AudioCallback(
     patch.ProcessAllControls();
     record_button.Debounce();
     shift_button.Debounce();
-    
-    spawn_position_scan_speed = map_to_range(patch.GetAdcValue(CV_4), -2, 2);
-    // Deadzone so you can match the recording speed
-    if (spawn_position_scan_speed > 0.85 && spawn_position_scan_speed < 1.15) {
-        spawn_position_scan_speed = 1;
-    }
 
     spawn_position_offset = patch.GetAdcValue(CV_8) * recording_length;
     spawn_position_spread = 0.f; //patch.GetAdcValue(CV_7);
@@ -156,7 +157,9 @@ void AudioCallback(
         }
     }
 
-    patch.SetLed(is_recording || shift_button.Pressed()); 
+    is_tracking = shift_button.Pressed();
+
+    patch.SetLed(is_tracking); 
 
     // Process audio
     for(size_t i = 0; i < size; i++)
@@ -179,12 +182,12 @@ void AudioCallback(
             if (recording_length < RECORDING_BUFFER_SIZE) {
                 recording_length++;
             }
-            
-            write_head++;
-            if (write_head >= RECORDING_BUFFER_SIZE) {
-                write_head = 0;
-            }
-        } 
+        }
+
+        write_head++;
+        if (write_head >= RECORDING_BUFFER_SIZE) {
+            write_head = 0;
+        }
 
         if (recording_length > 4800 /* A kinda abitrary number */) {
             samples_since_last_spawn++;
@@ -253,8 +256,6 @@ void AudioCallback(
         }
     }
 
-    spawn_position_scan_offset = fwrap(spawn_position_scan_offset + spawn_position_scan_speed * size, 0.f, recording_length);
-
     cpu_load_meter.OnBlockEnd();
 }
 
@@ -322,12 +323,28 @@ int main(void)
                 uint8_t margin = (oled.height - amplitude) / 2;
 
                 for (uint8_t y = margin; y < oled.width - margin; y++) {
-                    if (is_recording && renderable_recording_index == last_written_renderable_recording_index) {
-                        oled.setPixel(x, y, 0x4);
-                    } else {    
-                        oled.setPixel(x, y, 0x1);
+                    oled.setPixel(x, y, 0x1);
+                }
+            }
+
+            // Write head indicator
+            uint8_t write_head_screen_x = ((write_head / (float)RECORDING_BUFFER_SIZE) * oled.width - 1);
+            for (int x = 0; x < write_head_indicator_width; x++) {
+                for (int y = 0; y < write_head_indicator_height; y++) {
+                    uint8_t screen_x = wrap(x + write_head_screen_x - write_head_indicator_width / 2, 0, oled.width);
+                    uint8_t screen_y = wrap(y + oled.height - write_head_indicator_height, 0, oled.height);
+                    uint8_t bitmap_index = x + (y * write_head_indicator_width);
+
+                    if (is_recording) {
+                        oled.setPixel(screen_x, screen_y, write_head_indicator_recording[bitmap_index]);
+                    } else {
+                        oled.setPixel(screen_x, screen_y, write_head_indicator_not_recording[bitmap_index]);
                     }
                 }
+            }
+
+            for (int y = (oled.width / 2) - 3; y < (oled.width / 2) + 3; y++) {
+                oled.setPixel(write_head_screen_x, y, is_recording ? 0x8 : 0x2);
             }
 
             // Grain start offset
