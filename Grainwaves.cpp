@@ -17,9 +17,9 @@ using namespace daisysp;
 #define SHOW_PERFORMANCE_BARS true
 
 struct Grain {
-    size_t length = 0;
+    int length = 0;
     int spawn_position = 0;
-    size_t step = 0;
+    int step = 0;
     float pan = 0; // 0 is left, 1 is right.
     float playback_speed = 0;
 };
@@ -55,7 +55,7 @@ float spawn_positions_splay;
 float spawn_positions_count;
 float pitch_shift_in_semitones;
 float pitch_shift_spread;
-size_t grain_length;
+int grain_length;
 float pan_spread;
 float wet_dry_balance; // 0 - all wet, 1 - all dry, 0.5 - all wet and dry
 unsigned int spawn_time; // The number of samples between each new grain
@@ -132,6 +132,7 @@ void AudioCallback(
         raw_spawn_pos_splay = raw_spawn_pos_splay - 0.05f;
     } else {
         raw_spawn_pos_splay = 0;
+        spawn_positions_count = 1;
     }
     spawn_positions_splay = raw_spawn_pos_splay * recording_length;
 
@@ -139,7 +140,11 @@ void AudioCallback(
     pitch_shift_in_semitones = map_to_range(patch.GetAdcValue(CV_3), -24, 24); // Without CV this is more playable
     pitch_shift_spread = 0;//patch.GetAdcValue(CV_7);
 
-    grain_length = map_to_range(patch.GetAdcValue(CV_2), MIN_GRAIN_SIZE, MAX_GRAIN_SIZE);
+    grain_length = map_to_range(std::abs(patch.GetAdcValue(CV_2) - 0.5f) * 2, MIN_GRAIN_SIZE, MAX_GRAIN_SIZE);
+    if (patch.GetAdcValue(CV_2) < 0.5f) {
+        grain_length = -grain_length;
+    }
+
     pan_spread = 1; // patch.GetAdcValue(CV_6);
     wet_dry_balance = patch.GetAdcValue(CV_5);
 
@@ -198,7 +203,7 @@ void AudioCallback(
 
                 size_t new_grain_index = available_grains.PopBack();
 
-                grains[new_grain_index].length = grain_length;
+                grains[new_grain_index].length = std::abs(grain_length);
                 grains[new_grain_index].step = 0;
                 grains[new_grain_index].pan = 0.5f + randF(-0.5f, 0.5f) * pan_spread;
                 
@@ -206,8 +211,13 @@ void AudioCallback(
             
                 float pitch_shift_offset_in_semitones = randF(-2.f, 2.f) * pitch_shift_spread;
                 float pitch_shift_in_octaves = (pitch_shift_in_semitones + pitch_shift_offset_in_semitones) / 12.f;
-                float playback_speed = pow(2, pitch_shift_in_octaves);
-                grains[new_grain_index].playback_speed = playback_speed;
+
+                // Reverse the playback if the length is negative
+                if (grain_length > 0) {
+                    grains[new_grain_index].playback_speed = pow(2, pitch_shift_in_octaves);
+                } else {
+                    grains[new_grain_index].playback_speed = -pow(2, pitch_shift_in_octaves);
+                }
 
                 next_spawn_offset = randF(-1.f, 1.f); // +/- 100%
                 next_spawn_position_index = wrap(next_spawn_position_index + 1, 0, (int)spawn_positions_count);
