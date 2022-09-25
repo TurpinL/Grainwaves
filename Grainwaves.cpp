@@ -13,7 +13,7 @@ using namespace daisysp;
 #define RECORDING_BUFFER_SIZE (48000 * 5) // X seconds at 48kHz
 #define MIN_GRAIN_SIZE 480 // 10 ms
 #define MAX_GRAIN_SIZE (48000 * 2) // 2 second
-#define MAX_GRAIN_COUNT 48
+#define MAX_GRAIN_COUNT 64
 #define SHOW_PERFORMANCE_BARS true
 
 struct Grain {
@@ -46,6 +46,8 @@ float DSY_SDRAM_BSS renderable_recording[RENDERABLE_RECORDING_BUFFER_SIZE]; // M
 size_t last_written_renderable_recording_index = 0; 
 
 bool is_recording = true;
+bool is_stopping_recording = false;
+size_t recording_xfade_step = 0;
 bool is_tracking = true;
 
 float spawn_position_scan_speed;
@@ -70,25 +72,8 @@ Grain grains[MAX_GRAIN_COUNT];
 Stack<uint8_t, MAX_GRAIN_COUNT> available_grains;
 
 // Responsible for wrapping the index
-// and xfading the start and end of the track 
-// to get rid of the pop when transitioning from 
-// the last to the first sample of the recording
 inline float get_sample(int index) {
-    index = wrap(index, 0, recording_length);
-
-    int distance_from_write_head_to_index = wrap(index - write_head, 0, recording_length);
-
-    if (distance_from_write_head_to_index < RECORDING_XFADE_OVERLAP) {
-        float xfade_magnitude = 1 - (distance_from_write_head_to_index + 1) / ((float)RECORDING_XFADE_OVERLAP + 1.f);
-
-        return lerp(
-            recording[index], 
-            recording[write_head - 1], 
-            xfade_magnitude
-        );
-    } else {
-        return recording[index];
-    }
+    return recording[wrap(index, 0, recording_length)];
 }
 
 inline size_t get_spawn_position(int index) {
@@ -107,6 +92,16 @@ inline size_t get_spawn_position(int index) {
     }
     
     return fwrap(unwrapped_spawn_position, 0.f, recording_length);
+}
+
+void record_xfaded_sample(float sample_in) {
+    float xfade_magnitude = (recording_xfade_step + 1) / ((float)RECORDING_XFADE_OVERLAP + 1.f);
+
+    recording[write_head] = lerp(
+        recording[write_head],
+        sample_in,
+        xfade_magnitude
+    );
 }
 
 void AudioCallback(
@@ -157,8 +152,9 @@ void AudioCallback(
     {
         if (!is_recording) {
             is_recording = true;
+            recording_xfade_step = 0;
         } else {
-            is_recording = false;
+            is_stopping_recording = true;
         }
     }
 
@@ -170,7 +166,25 @@ void AudioCallback(
     for(size_t i = 0; i < size; i++)
     {
         if (is_recording) {
-            recording[write_head] = IN_L[i];
+            if (is_stopping_recording) {
+                // Record a little extra at the end of the recording so we can xfade the values
+                // and stop the pop sound
+                record_xfaded_sample(IN_L[i]);
+
+                recording_xfade_step--;
+
+                if (recording_xfade_step == 0) {
+                    is_recording = false;
+                    is_stopping_recording = false;
+                }
+            } else if (recording_xfade_step < RECORDING_XFADE_OVERLAP) {
+                // xfade in the start of the recording to stop the pop sound
+                record_xfaded_sample(IN_L[i]);
+
+                recording_xfade_step++;
+            } else {
+                recording[write_head] = IN_L[i];
+            }
 
             // TODO: Record positive and negative values seperately
             size_t renderable_recording_index = write_head * RECORDING_TO_RENDERABLE_RECORDING_BUFFER_RATIO;
