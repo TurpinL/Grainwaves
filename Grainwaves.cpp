@@ -13,7 +13,7 @@ using namespace daisysp;
 #define RECORDING_BUFFER_SIZE (48000 * 5) // X seconds at 48kHz
 #define MIN_GRAIN_SIZE 480 // 10 ms
 #define MAX_GRAIN_SIZE (48000 * 2) // 2 second
-#define MAX_GRAIN_COUNT 64
+#define MAX_GRAIN_COUNT 48
 #define SHOW_PERFORMANCE_BARS true
 
 struct Grain {
@@ -56,6 +56,8 @@ float spawn_position_spread;
 float spawn_positions_splay;
 float spawn_positions_count;
 float pitch_shift_in_semitones;
+float alt_pitch_shift_in_semitones;
+bool whichPitch = false;
 float pitch_shift_spread;
 int grain_length;
 float pan_spread;
@@ -132,7 +134,8 @@ void AudioCallback(
     spawn_positions_splay = raw_spawn_pos_splay * recording_length;
 
     // pitch_shift_in_semitones = map_to_range(patch.GetAdcValue(CV_7), -12 * 5, 12 * 5); // volt per octave
-    pitch_shift_in_semitones = map_to_range(patch.GetAdcValue(CV_3), -24, 24); // Without CV this is more playable
+    pitch_shift_in_semitones = map_to_range(patch.GetAdcValue(CV_4), -24, 24); // Without CV this is more playable
+    alt_pitch_shift_in_semitones = pitch_shift_in_semitones + map_to_range(patch.GetAdcValue(CV_3), -24, 24); 
     pitch_shift_spread = 0;//patch.GetAdcValue(CV_7);
 
     grain_length = map_to_range(std::abs(patch.GetAdcValue(CV_2) - 0.5f) * 2, MIN_GRAIN_SIZE, MAX_GRAIN_SIZE);
@@ -224,7 +227,9 @@ void AudioCallback(
                 grains[new_grain_index].spawn_position = get_spawn_position(next_spawn_position_index) + spawn_position_spread * randF(-0.5f, 0.5f) * recording_length;
             
                 float pitch_shift_offset_in_semitones = randF(-2.f, 2.f) * pitch_shift_spread;
-                float pitch_shift_in_octaves = (pitch_shift_in_semitones + pitch_shift_offset_in_semitones) / 12.f;
+                float shift = whichPitch ? pitch_shift_in_semitones : alt_pitch_shift_in_semitones;
+                float pitch_shift_in_octaves = (shift + pitch_shift_offset_in_semitones) / 12.f;
+                whichPitch = !whichPitch;
 
                 // Reverse the playback if the length is negative
                 if (grain_length > 0) {
