@@ -8,6 +8,7 @@
 using namespace daisy;
 using namespace patch_sm;
 using namespace daisysp;
+using namespace std;
 
 #define RECORDING_XFADE_OVERLAP 100 // Samples
 #define RECORDING_BUFFER_SIZE (48000 * 5) // X seconds at 48kHz
@@ -64,6 +65,7 @@ float pitch_shift_spread;
 int grain_length;
 float pan_spread;
 float wet_dry_balance; // 0 - all wet, 1 - all dry, 0.5 - all wet and dry
+float grain_density; // Target concurrent grains
 unsigned int spawn_time; // The number of samples between each new grain
 float spawn_time_spread; // The variance of the spawn rate
 uint32_t last_spawn_time_at_position[MAX_SPAWN_POINTS] = { 0 };
@@ -142,7 +144,7 @@ void AudioCallback(
     alt_pitch_shift_in_semitones = pitch_shift_in_semitones + map_to_range(patch.GetAdcValue(CV_3), -24, 24); 
     pitch_shift_spread = 0;//patch.GetAdcValue(CV_7);
 
-    grain_length = map_to_range(std::abs(patch.GetAdcValue(CV_2) - 0.5f) * 2, MIN_GRAIN_SIZE, MAX_GRAIN_SIZE);
+    grain_length = map_to_range(abs(patch.GetAdcValue(CV_2) - 0.5f) * 2, MIN_GRAIN_SIZE, MAX_GRAIN_SIZE);
     if (patch.GetAdcValue(CV_2) < 0.5f) {
         grain_length = -grain_length;
     }
@@ -150,7 +152,8 @@ void AudioCallback(
     pan_spread = 1; // patch.GetAdcValue(CV_6);
     wet_dry_balance = patch.GetAdcValue(CV_5);
 
-    spawn_time = map_to_range(1 - log10f(1 + patch.GetAdcValue(CV_1) * 9), 0, MAX_GRAIN_SIZE / 4);
+    grain_density = map_to_range(patch.GetAdcValue(CV_1) * patch.GetAdcValue(CV_1), 0.5f, MAX_GRAIN_COUNT);
+    spawn_time = abs(grain_length) / grain_density;
     spawn_time_spread = 0.f; // patch.GetAdcValue(CV_5);  
     float actual_spawn_time = spawn_time * (1 + next_spawn_offset * spawn_time_spread);
 
@@ -224,7 +227,7 @@ void AudioCallback(
 
                 size_t new_grain_index = available_grains.PopBack();
 
-                grains[new_grain_index].length = std::abs(grain_length);
+                grains[new_grain_index].length = abs(grain_length);
                 grains[new_grain_index].step = 0;
                 grains[new_grain_index].pan = 0.5f + randF(-0.5f, 0.5f) * pan_spread;
                 
@@ -263,7 +266,7 @@ void AudioCallback(
                     float interpolated_sample = sample * (1 - decimal_portion) + next_sample * decimal_portion;
 
                     // hacky bad envelope
-                    float envelope_mult = std::min((grains[j].length - grains[j].step), grains[j].step);
+                    float envelope_mult = min((grains[j].length - grains[j].step), grains[j].step);
                     float signal = interpolated_sample * envelope_mult / grains[j].length;
 
                     wet_l += (1.f - grains[j].pan) * signal;
@@ -277,13 +280,13 @@ void AudioCallback(
                 }
             }
 
-            float dry_level = std::min(wet_dry_balance, 0.5f) * 2;
-            float wet_level = std::min(1 - wet_dry_balance, 0.5f) * 2;
+            float dry_level = min(wet_dry_balance, 0.5f) * 2;
+            float wet_level = min(1 - wet_dry_balance, 0.5f) * 2;
 
             OUT_L[i] = wet_l * wet_level + IN_L[i] * dry_level;
             OUT_R[i] = wet_r * wet_level + IN_L[i] * dry_level;
         } else {
-            float dry_level = std::min(wet_dry_balance, 0.5f) * 2;
+            float dry_level = min(wet_dry_balance, 0.5f) * 2;
 
             OUT_L[i] = IN_L[i] * dry_level;
             OUT_R[i] = IN_L[i] * dry_level;
@@ -345,7 +348,7 @@ int main(void)
             for (int x = oled.width - 1; x >= 0; x--) {
                 size_t renderable_recording_index = (x / (float)oled.width) * RENDERABLE_RECORDING_BUFFER_SIZE;
 
-                uint8_t amplitude = std::min(128.f, renderable_recording[renderable_recording_index] / 0.1f * oled.height);
+                uint8_t amplitude = min(128.f, renderable_recording[renderable_recording_index] / 0.1f * oled.height);
 
                 // Smooth out the waveform
                 // TODO: Smooth differently, this produces weird classic LPF shapes
@@ -388,7 +391,7 @@ int main(void)
                 float spawn_position_x = get_spawn_position(i) / (float)recording_length * oled.width;
                 float spawn_position_x_decimal_part = modf(spawn_position_x);
                 int time_since_last_spawn = System::GetNow() - last_spawn_time_at_position[i];
-                float flash_intensity = 1 - (std::min(SPAWN_BAR_FLASH_MILLIS, time_since_last_spawn) / (float)SPAWN_BAR_FLASH_MILLIS);
+                float flash_intensity = 1 - (min(SPAWN_BAR_FLASH_MILLIS, time_since_last_spawn) / (float)SPAWN_BAR_FLASH_MILLIS);
 
                 uint8_t minColor = flash_intensity * 2;
                 uint8_t maxColor = 2 + flash_intensity * 12;
@@ -408,7 +411,7 @@ int main(void)
                     uint32_t current_offset = wrap(grain.spawn_position + grain.step * grains[j].playback_speed, 0, recording_length);
                     uint8_t x = (current_offset / (float)recording_length) * oled.width;
 
-                    float amplitude = 2 * std::min((grains[j].length - grains[j].step), grains[j].step) / (float)grains[j].length;  
+                    float amplitude = 2 * min((grains[j].length - grains[j].step), grains[j].step) / (float)grains[j].length;  
 
                     oled.setPixel(x, y, 0xA * amplitude);
                     oled.setPixel((x + 1) % oled.width, y, 0xF * amplitude);
@@ -455,8 +458,8 @@ int main(void)
             // Note, this ignores any work done in this loop, eg running the OLED
             // patch.PrintLine("cpu Max: " FLT_FMT3 " Avg:" FLT_FMT3, FLT_VAR3(cpu_load_meter.GetMaxCpuLoad()), FLT_VAR3(cpu_load_meter.GetAvgCpuLoad()));
             // patch.PrintLine(FLT_FMT3, FLT_VAR3(round(map_to_range(patch.GetAdcValue(CV_7), -12, 12)) / 12));
-            // patch.PrintLine(FLT_FMT3, FLT_VAR3(patch.GetAdcValue(CV_8)));
-            patch.PrintLine("%d", last_spawn_time_at_position[0]);
+            patch.PrintLine(FLT_FMT3 "\t" FLT_FMT3 " %d", FLT_VAR3(grain_density), FLT_VAR3(patch.GetAdcValue(CV_1)), (MAX_GRAIN_COUNT - available_grains.GetNumElements()));
+            // patch.PrintLine("%d", last_spawn_time_at_position[0]);
         }
     }
 } 
