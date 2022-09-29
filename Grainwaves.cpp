@@ -39,6 +39,8 @@ float DSY_SDRAM_BSS recording[RECORDING_BUFFER_SIZE];
 size_t recording_length = RECORDING_BUFFER_SIZE;
 size_t write_head = 0;
 
+const uint8_t MAX_SPAWN_POINTS = 7;
+
 const size_t RENDERABLE_RECORDING_BUFFER_SIZE = oled.width;
 const float RECORDING_TO_RENDERABLE_RECORDING_BUFFER_RATIO = RENDERABLE_RECORDING_BUFFER_SIZE / (float)RECORDING_BUFFER_SIZE;
 const float RENDERABLE_RECORDING_TO_RECORDING_BUFFER_RATIO = RECORDING_BUFFER_SIZE / (float)RENDERABLE_RECORDING_BUFFER_SIZE;
@@ -64,10 +66,12 @@ float pan_spread;
 float wet_dry_balance; // 0 - all wet, 1 - all dry, 0.5 - all wet and dry
 unsigned int spawn_time; // The number of samples between each new grain
 float spawn_time_spread; // The variance of the spawn rate
+uint32_t last_spawn_time_at_position[MAX_SPAWN_POINTS] = { 0 };
+const int SPAWN_BAR_FLASH_MILLIS = 250;
 
 int next_spawn_position_index = 0;
 float spawn_position = 0.f;
-float next_spawn_offset; 
+float next_spawn_offset;
 uint32_t samples_since_last_spawn = 0;
 
 Grain grains[MAX_GRAIN_COUNT];
@@ -96,7 +100,7 @@ inline size_t get_spawn_position(int index) {
     return fwrap(unwrapped_spawn_position, 0.f, recording_length);
 }
 
-void record_xfaded_sample(float sample_in) {
+inline void record_xfaded_sample(float sample_in) {
     float xfade_magnitude = (recording_xfade_step + 1) / ((float)RECORDING_XFADE_OVERLAP + 1.f);
 
     recording[write_head] = lerp(
@@ -119,7 +123,7 @@ void AudioCallback(
 
     spawn_position_offset = patch.GetAdcValue(CV_8) * recording_length;
     spawn_position_spread = 0.f; //patch.GetAdcValue(CV_7);
-    spawn_positions_count = 2.9f + map_to_range(patch.GetAdcValue(CV_6), 0, 5);
+    spawn_positions_count = 2.7f + map_to_range(patch.GetAdcValue(CV_6), 0, MAX_SPAWN_POINTS - 2);
 
     // Deadzone at 0 to the spawn position splay
     float raw_spawn_pos_splay = map_to_range(patch.GetAdcValue(CV_7), -1, 1);
@@ -225,6 +229,7 @@ void AudioCallback(
                 grains[new_grain_index].pan = 0.5f + randF(-0.5f, 0.5f) * pan_spread;
                 
                 grains[new_grain_index].spawn_position = get_spawn_position(next_spawn_position_index) + spawn_position_spread * randF(-0.5f, 0.5f) * recording_length;
+                last_spawn_time_at_position[next_spawn_position_index] = System::GetNow();
             
                 float pitch_shift_offset_in_semitones = randF(-2.f, 2.f) * pitch_shift_spread;
                 float shift = whichPitch ? pitch_shift_in_semitones : alt_pitch_shift_in_semitones;
@@ -382,17 +387,15 @@ int main(void)
             for (int i = 0; i < (int)spawn_positions_count; i++) {
                 float spawn_position_x = get_spawn_position(i) / (float)recording_length * oled.width;
                 float spawn_position_x_decimal_part = modf(spawn_position_x);
+                int time_since_last_spawn = System::GetNow() - last_spawn_time_at_position[i];
+                float flash_intensity = 1 - (std::min(SPAWN_BAR_FLASH_MILLIS, time_since_last_spawn) / (float)SPAWN_BAR_FLASH_MILLIS);
 
-                if (i == 0) {
-                    for (uint8_t y = y_margin; y < oled.height - y_margin; y++) {
-                        oled.setPixel(spawn_position_x, y, map_to_range(1 - spawn_position_x_decimal_part, 0x1, 0x5));
-                        oled.setPixel(wrap(spawn_position_x + 1, 0, oled.width), y, map_to_range(spawn_position_x_decimal_part, 0x1, 0x5));
-                    }
-                } else {
-                    for (uint8_t y = y_margin; y < oled.height - y_margin; y++) {
-                        oled.setPixel(spawn_position_x, y, map_to_range(1 - spawn_position_x_decimal_part, 0x1, 0x3));
-                        oled.setPixel(wrap(spawn_position_x + 1, 0, oled.width), y, map_to_range(spawn_position_x_decimal_part, 0x1, 0x3));
-                    }
+                uint8_t minColor = flash_intensity * 2;
+                uint8_t maxColor = 2 + flash_intensity * 12;
+
+                for (uint8_t y = y_margin; y < oled.height - y_margin; y++) {
+                    oled.setPixel(spawn_position_x, y, map_to_range(1 - spawn_position_x_decimal_part, minColor, maxColor));
+                    oled.setPixel(wrap(spawn_position_x + 1, 0, oled.width), y, map_to_range(spawn_position_x_decimal_part, minColor, maxColor));
                 }
             }
 
@@ -405,7 +408,7 @@ int main(void)
                     uint32_t current_offset = wrap(grain.spawn_position + grain.step * grains[j].playback_speed, 0, recording_length);
                     uint8_t x = (current_offset / (float)recording_length) * oled.width;
 
-                    float amplitude = std::min((grains[j].length - grains[j].step), grains[j].step) / (float)grains[j].length;  
+                    float amplitude = 2 * std::min((grains[j].length - grains[j].step), grains[j].step) / (float)grains[j].length;  
 
                     oled.setPixel(x, y, 0xA * amplitude);
                     oled.setPixel((x + 1) % oled.width, y, 0xF * amplitude);
@@ -453,7 +456,7 @@ int main(void)
             // patch.PrintLine("cpu Max: " FLT_FMT3 " Avg:" FLT_FMT3, FLT_VAR3(cpu_load_meter.GetMaxCpuLoad()), FLT_VAR3(cpu_load_meter.GetAvgCpuLoad()));
             // patch.PrintLine(FLT_FMT3, FLT_VAR3(round(map_to_range(patch.GetAdcValue(CV_7), -12, 12)) / 12));
             // patch.PrintLine(FLT_FMT3, FLT_VAR3(patch.GetAdcValue(CV_8)));
-            patch.PrintLine("%d", spawn_time);
+            patch.PrintLine("%d", last_spawn_time_at_position[0]);
         }
     }
 } 
