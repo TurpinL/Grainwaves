@@ -96,7 +96,7 @@ inline size_t get_spawn_position(int index) {
     if (index == (int)spawn_positions_count - 1) {
         unwrapped_spawn_position += spawn_positions_splay;
     } else if (index != 0) {
-        unwrapped_spawn_position += spawn_positions_splay - index * (spawn_positions_splay / (spawn_positions_count - 2));
+        unwrapped_spawn_position += index * (spawn_positions_splay / (spawn_positions_count - 2));
     }
     
     return fwrap(unwrapped_spawn_position, 0.f, recording_length);
