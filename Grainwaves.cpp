@@ -14,7 +14,7 @@ using namespace std;
 #define RECORDING_BUFFER_SIZE (48000 * 5) // X seconds at 48kHz
 #define MIN_GRAIN_SIZE 480 // 10 ms
 #define MAX_GRAIN_SIZE (48000 * 2) // 2 second
-#define MAX_GRAIN_COUNT 48
+#define MAX_GRAIN_COUNT 32
 #define SHOW_PERFORMANCE_BARS true
 
 struct Grain {
@@ -29,6 +29,7 @@ DaisyPatchSM patch;
 CpuLoadMeter cpu_load_meter;
 Switch       record_button;
 Switch       shift_button;
+ReverbSc     reverb;
 
 uint8_t DMA_BUFFER_MEM_SECTION oled_buffer[SSD1327_REQUIRED_DMA_BUFFER_SIZE];
 Daisy_SSD1327 oled;
@@ -124,7 +125,7 @@ void AudioCallback(
     shift_button.Debounce();
 
     spawn_position_offset = patch.GetAdcValue(CV_8) * recording_length;
-    spawn_position_spread = 0.f; //patch.GetAdcValue(CV_7);
+    spawn_position_spread = 0.f; // patch.GetAdcValue(CV_7);
     spawn_positions_count = 2.7f + map_to_range(patch.GetAdcValue(CV_6), 0, MAX_SPAWN_POINTS - 2);
 
     // Deadzone at 0 to the spawn position splay
@@ -141,7 +142,7 @@ void AudioCallback(
 
     // pitch_shift_in_semitones = map_to_range(patch.GetAdcValue(CV_7), -12 * 5, 12 * 5); // volt per octave
     pitch_shift_in_semitones = map_to_range(patch.GetAdcValue(CV_4), -24, 24); // Without CV this is more playable
-    alt_pitch_shift_in_semitones = pitch_shift_in_semitones + map_to_range(patch.GetAdcValue(CV_3), -24, 24); 
+    alt_pitch_shift_in_semitones = pitch_shift_in_semitones; // + map_to_range(patch.GetAdcValue(CV_3), -24, 24); 
     pitch_shift_spread = 0;//patch.GetAdcValue(CV_7);
 
     grain_length = map_to_range(abs(patch.GetAdcValue(CV_2) - 0.5f) * 2, MIN_GRAIN_SIZE, MAX_GRAIN_SIZE);
@@ -156,6 +157,13 @@ void AudioCallback(
     spawn_time = abs(grain_length) / grain_density;
     spawn_time_spread = 0.f; // patch.GetAdcValue(CV_5);  
     float actual_spawn_time = spawn_time * (1 + next_spawn_offset * spawn_time_spread);
+
+    float reverb_amount = patch.GetAdcValue(CV_3);
+    float reverb_time = fmap(min(reverb_amount, 0.5f) * 2, 0.3f, 0.99f);
+    float reverb_damp = fmap(max(reverb_amount - 0.5f, 0.f) * 2, 1000.f, 19000.f, Mapping::LOG);
+
+    reverb.SetFeedback(reverb_time);
+    reverb.SetLpFreq(reverb_damp);
 
     // Toggle the record state on button press
     if(record_button.RisingEdge())
@@ -266,8 +274,8 @@ void AudioCallback(
                     float interpolated_sample = sample * (1 - decimal_portion) + next_sample * decimal_portion;
 
                     // hacky bad envelope
-                    float envelope_mult = min((grains[j].length - grains[j].step), grains[j].step);
-                    float signal = interpolated_sample * envelope_mult / grains[j].length;
+                    float envelope_mult = min((grains[j].length - grains[j].step), grains[j].step) / max(1.f, (float)grains[j].length);
+                    float signal = interpolated_sample * envelope_mult;
 
                     wet_l += (1.f - grains[j].pan) * signal;
                     wet_r += grains[j].pan * signal;
@@ -283,13 +291,15 @@ void AudioCallback(
             float dry_level = min(wet_dry_balance, 0.5f) * 2;
             float wet_level = min(1 - wet_dry_balance, 0.5f) * 2;
 
-            OUT_L[i] = wet_l * wet_level + IN_L[i] * dry_level;
-            OUT_R[i] = wet_r * wet_level + IN_L[i] * dry_level;
+            float reverb_in_l = wet_l * wet_level + IN_L[i] * dry_level;
+            float reverb_in_r = wet_r * wet_level + IN_L[i] * dry_level;
+            float reverb_wet_l, reverb_wet_r;
+            reverb.Process(reverb_in_l, reverb_in_r, &reverb_wet_l, &reverb_wet_r);
+            OUT_L[i] = reverb_in_l + reverb_wet_l;
+            OUT_R[i] = reverb_in_r + reverb_wet_r;
         } else {
-            float dry_level = min(wet_dry_balance, 0.5f) * 2;
-
-            OUT_L[i] = IN_L[i] * dry_level;
-            OUT_R[i] = IN_L[i] * dry_level;
+            OUT_L[i] = 0;
+            OUT_R[i] = 0;
         }
     }
 
@@ -329,6 +339,7 @@ int main(void)
     memset(recording, 0, sizeof(recording));
 
     cpu_load_meter.Init(patch.AudioSampleRate(), patch.AudioBlockSize());
+    reverb.Init(patch.AudioSampleRate());
     patch.StartAudio(AudioCallback);
 
     while(1) {
