@@ -56,16 +56,10 @@ bool is_tracking = true;
 
 float spawn_position_scan_speed;
 float spawn_position_offset;
-float spawn_position_spread;
 float spawn_positions_splay;
 float spawn_positions_count;
 float pitch_shift_in_semitones;
-float alt_pitch_shift_in_semitones;
-bool whichPitch = false;
-float pitch_shift_spread;
 int grain_length;
-float pan_spread;
-float wet_dry_balance; // 0 - all wet, 1 - all dry, 0.5 - all wet and dry
 float grain_density; // Target concurrent grains
 unsigned int spawn_time; // The number of samples between each new grain
 float spawn_time_spread; // The variance of the spawn rate
@@ -125,7 +119,6 @@ void AudioCallback(
     shift_button.Debounce();
 
     spawn_position_offset = patch.GetAdcValue(CV_8) * recording_length;
-    spawn_position_spread = 0.f; // patch.GetAdcValue(CV_7);
     spawn_positions_count = 2.7f + map_to_range(patch.GetAdcValue(CV_6), 0, MAX_SPAWN_POINTS - 2);
 
     // Deadzone at 0 to the spawn position splay
@@ -142,20 +135,15 @@ void AudioCallback(
 
     // pitch_shift_in_semitones = map_to_range(patch.GetAdcValue(CV_7), -12 * 5, 12 * 5); // volt per octave
     pitch_shift_in_semitones = map_to_range(patch.GetAdcValue(CV_4), -24, 24); // Without CV this is more playable
-    alt_pitch_shift_in_semitones = pitch_shift_in_semitones; // + map_to_range(patch.GetAdcValue(CV_3), -24, 24); 
-    pitch_shift_spread = 0;//patch.GetAdcValue(CV_7);
 
     grain_length = map_to_range(abs(patch.GetAdcValue(CV_2) - 0.5f) * 2, MIN_GRAIN_SIZE, MAX_GRAIN_SIZE);
     if (patch.GetAdcValue(CV_2) < 0.5f) {
         grain_length = -grain_length;
     }
 
-    pan_spread = 1; // patch.GetAdcValue(CV_6);
-    wet_dry_balance = patch.GetAdcValue(CV_5);
-
     grain_density = map_to_range(patch.GetAdcValue(CV_1) * patch.GetAdcValue(CV_1), 0.5f, MAX_GRAIN_COUNT);
     spawn_time = abs(grain_length) / grain_density;
-    spawn_time_spread = 0.f; // patch.GetAdcValue(CV_5);  
+    spawn_time_spread = patch.GetAdcValue(CV_5);  
     float actual_spawn_time = spawn_time * (1 + next_spawn_offset * spawn_time_spread);
 
     float reverb_amount = patch.GetAdcValue(CV_3);
@@ -237,15 +225,12 @@ void AudioCallback(
 
                 grains[new_grain_index].length = abs(grain_length);
                 grains[new_grain_index].step = 0;
-                grains[new_grain_index].pan = 0.5f + randF(-0.5f, 0.5f) * pan_spread;
+                grains[new_grain_index].pan = 0.5f + randF(-0.5f, 0.5f);
                 
-                grains[new_grain_index].spawn_position = get_spawn_position(next_spawn_position_index) + spawn_position_spread * randF(-0.5f, 0.5f) * recording_length;
+                grains[new_grain_index].spawn_position = get_spawn_position(next_spawn_position_index);
                 last_spawn_time_at_position[next_spawn_position_index] = System::GetNow();
             
-                float pitch_shift_offset_in_semitones = randF(-2.f, 2.f) * pitch_shift_spread;
-                float shift = whichPitch ? pitch_shift_in_semitones : alt_pitch_shift_in_semitones;
-                float pitch_shift_in_octaves = (shift + pitch_shift_offset_in_semitones) / 12.f;
-                whichPitch = !whichPitch;
+                float pitch_shift_in_octaves = pitch_shift_in_semitones / 12.f;
 
                 // Reverse the playback if the length is negative
                 if (grain_length > 0) {
@@ -288,15 +273,12 @@ void AudioCallback(
                 }
             }
 
-            float dry_level = min(wet_dry_balance, 0.5f) * 2;
-            float wet_level = min(1 - wet_dry_balance, 0.5f) * 2;
-
-            float reverb_in_l = wet_l * wet_level + IN_L[i] * dry_level;
-            float reverb_in_r = wet_r * wet_level + IN_L[i] * dry_level;
+            float reverb_in_l = wet_l;
+            float reverb_in_r = wet_r;
             float reverb_wet_l, reverb_wet_r;
             reverb.Process(reverb_in_l, reverb_in_r, &reverb_wet_l, &reverb_wet_r);
-            OUT_L[i] = reverb_in_l + reverb_wet_l;
-            OUT_R[i] = reverb_in_r + reverb_wet_r;
+            OUT_L[i] = reverb_in_l + reverb_wet_l + IN_L[i];
+            OUT_R[i] = reverb_in_r + reverb_wet_r + IN_L[i];
         } else {
             OUT_L[i] = 0;
             OUT_R[i] = 0;
@@ -396,7 +378,7 @@ int main(void)
             }
 
             // Grain start offset
-            uint8_t y_margin = (oled.height - pan_spread * oled.height) / 2;
+            uint8_t y_margin = 8;
 
             for (int i = 0; i < (int)spawn_positions_count; i++) {
                 float spawn_position_x = get_spawn_position(i) / (float)recording_length * oled.width;
