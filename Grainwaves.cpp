@@ -147,8 +147,9 @@ void AudioCallback(
     float actual_spawn_time = spawn_time * (1 + next_spawn_offset * spawn_time_spread);
 
     float reverb_amount = patch.GetAdcValue(CV_3);
-    float reverb_time = fmap(min(reverb_amount, 0.5f) * 2, 0.3f, 0.99f);
-    float reverb_damp = fmap(max(reverb_amount - 0.5f, 0.f) * 2, 1000.f, 19000.f, Mapping::LOG);
+    float reverb_time = fmap(min(reverb_amount, 0.5f) * 2, 0.5f, 0.99f);
+    float reverb_damp = fmap(reverb_amount, 100.f, 24000.f, Mapping::LOG);
+    float reverb_wet_mix = min(reverb_amount, 0.1f) * 7;
 
     reverb.SetFeedback(reverb_time);
     reverb.SetLpFreq(reverb_damp);
@@ -277,8 +278,8 @@ void AudioCallback(
             float reverb_in_r = wet_r;
             float reverb_wet_l, reverb_wet_r;
             reverb.Process(reverb_in_l, reverb_in_r, &reverb_wet_l, &reverb_wet_r);
-            OUT_L[i] = reverb_in_l + reverb_wet_l + IN_L[i];
-            OUT_R[i] = reverb_in_r + reverb_wet_r + IN_L[i];
+            OUT_L[i] = reverb_in_l + (reverb_wet_l * reverb_wet_mix) + IN_L[i];
+            OUT_R[i] = reverb_in_r + (reverb_wet_r * reverb_wet_mix) + IN_L[i];
         } else {
             OUT_L[i] = 0;
             OUT_R[i] = 0;
