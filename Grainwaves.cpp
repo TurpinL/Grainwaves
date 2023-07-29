@@ -10,12 +10,16 @@ using namespace patch_sm;
 using namespace daisysp;
 using namespace std;
 
-#define RECORDING_XFADE_OVERLAP 100 // Samples
-#define RECORDING_BUFFER_SIZE (48000 * 5) // X seconds at 48kHz
-#define MIN_GRAIN_SIZE 480 // 10 ms
-#define MAX_GRAIN_SIZE (48000 * 2) // 2 second
-#define MAX_GRAIN_COUNT 32
-#define SHOW_PERFORMANCE_BARS true
+const int RECORDING_XFADE_OVERLAP = 100; // Samples
+const int RECORDING_BUFFER_SIZE = 48000 * 5; // X seconds at 48kHz
+const int MIN_GRAIN_SIZE = 480; // 10 ms
+const int MAX_GRAIN_SIZE = 48000 * 2; // 2 second
+const int MAX_GRAIN_COUNT = 32;
+const bool SHOW_PERFORMANCE_BARS = true;
+const uint8_t MAX_SPAWN_POINTS = 7;
+const int SPAWN_BAR_FLASH_MILLIS = 250;
+const int SPAWN_LED_FLASH_MILLIS = 250;
+const int SPAWN_TRIGGER_OUT_MILLIS = 2;
 
 struct Grain {
     int length = 0;
@@ -27,21 +31,23 @@ struct Grain {
 
 DaisyPatchSM patch;
 CpuLoadMeter cpu_load_meter;
+
+Switch       density_length_link_switch;
+Switch       spawn_button;
 Switch       record_button;
-Switch       shift_button;
+Switch       play_button;
+GPIO         record_led;
+GPIO         play_led;
+
 ReverbSc     reverb;
 
 uint8_t DMA_BUFFER_MEM_SECTION oled_buffer[SSD1327_REQUIRED_DMA_BUFFER_SIZE];
 Daisy_SSD1327 oled;
 SpiHandle spi;
-dsy_gpio dc_pin;
-I2CHandle i2c;
 
 float DSY_SDRAM_BSS recording[RECORDING_BUFFER_SIZE];
 size_t recording_length = RECORDING_BUFFER_SIZE;
 size_t write_head = 0;
-
-const uint8_t MAX_SPAWN_POINTS = 7;
 
 const size_t RENDERABLE_RECORDING_BUFFER_SIZE = oled.width;
 const float RECORDING_TO_RENDERABLE_RECORDING_BUFFER_RATIO = RENDERABLE_RECORDING_BUFFER_SIZE / (float)RECORDING_BUFFER_SIZE;
@@ -49,63 +55,39 @@ const float RENDERABLE_RECORDING_TO_RECORDING_BUFFER_RATIO = RECORDING_BUFFER_SI
 float DSY_SDRAM_BSS renderable_recording[RENDERABLE_RECORDING_BUFFER_SIZE]; // Much lower resolution, for easy rendering
 size_t last_written_renderable_recording_index = 0; 
 
+bool is_tracking = false;
 bool is_recording = true;
 bool is_stopping_recording = false;
 size_t recording_xfade_step = 0;
-bool is_tracking = true;
 
 float spawn_position_scan_speed;
 float spawn_position_offset;
 float spawn_positions_splay;
 float spawn_positions_count;
 float pitch_shift_in_semitones;
+bool primed_for_manual_spawn = true;
 int grain_length;
 float grain_density; // Target concurrent grains
 unsigned int spawn_time; // The number of samples between each new grain
 float spawn_time_spread; // The variance of the spawn rate
 uint32_t last_spawn_time_at_position[MAX_SPAWN_POINTS] = { 0 };
-const int SPAWN_BAR_FLASH_MILLIS = 250;
+uint32_t last_spawn_time;
 
 int next_spawn_position_index = 0;
 float spawn_position = 0.f;
 float next_spawn_offset;
-uint32_t samples_since_last_spawn = 0;
+uint32_t samples_since_last_non_manual_spawn = 0;
 
 Grain grains[MAX_GRAIN_COUNT];
 Stack<uint8_t, MAX_GRAIN_COUNT> available_grains;
 
-// Responsible for wrapping the index
-inline float get_sample(int index) {
-    return recording[wrap(index, 0, recording_length)];
-}
+uint32_t last_render_millis = 0;
+uint32_t last_debug_print_millis = 0;
 
-inline size_t get_spawn_position(int index) {
-    int unwrapped_spawn_position;
-    
-    if (is_tracking) {
-        unwrapped_spawn_position = write_head + (spawn_position_offset - (recording_length / 2));
-    } else {
-        unwrapped_spawn_position = spawn_position_offset;
-    }
-                    
-    if (index == (int)spawn_positions_count - 1) {
-        unwrapped_spawn_position += spawn_positions_splay;
-    } else if (index != 0) {
-        unwrapped_spawn_position += index * (spawn_positions_splay / (spawn_positions_count - 2));
-    }
-    
-    return fwrap(unwrapped_spawn_position, 0.f, recording_length);
-}
-
-inline void record_xfaded_sample(float sample_in) {
-    float xfade_magnitude = (recording_xfade_step + 1) / ((float)RECORDING_XFADE_OVERLAP + 1.f);
-
-    recording[write_head] = lerp(
-        recording[write_head],
-        sample_in,
-        xfade_magnitude
-    );
-}
+inline float get_sample(int index);
+inline size_t get_spawn_position(int index);
+inline void record_xfaded_sample(float sample_in);
+inline void write_spawn_led(float intensity);
 
 void AudioCallback(
     AudioHandle::InputBuffer  in,
@@ -116,13 +98,34 @@ void AudioCallback(
 
     patch.ProcessAllControls();
     record_button.Debounce();
-    shift_button.Debounce();
+    play_button.Debounce();
+    spawn_button.Debounce();
+    density_length_link_switch.Debounce();
 
-    spawn_position_offset = patch.GetAdcValue(CV_8) * recording_length;
-    spawn_positions_count = 2.7f + map_to_range(patch.GetAdcValue(CV_6), 0, MAX_SPAWN_POINTS - 2);
+    float raw_pitch_pot = patch.GetAdcValue(ADC_9);
+    float raw_length_pot = patch.adc.GetMuxFloat(ADC_10, 0);
+    float raw_position_pot = patch.adc.GetMuxFloat(ADC_10, 1);
+    float raw_jitter_pot = patch.adc.GetMuxFloat(ADC_10, 2);
+    float raw_splay_pot = patch.adc.GetMuxFloat(ADC_10, 3);
+    float raw_density_pot = patch.adc.GetMuxFloat(ADC_10, 4);
+    float raw_count_pot = patch.adc.GetMuxFloat(ADC_10, 5);
+    float raw_reverb_pot = patch.adc.GetMuxFloat(ADC_10, 6);
+    float raw_spawn_volume_pot = patch.adc.GetMuxFloat(ADC_10, 7);
+
+    float raw_reverb_cv = patch.GetAdcValue(CV_1);
+    float raw_pitch_cv = patch.GetAdcValue(CV_2);
+    float raw_length_cv = patch.GetAdcValue(CV_3);
+    float raw_density_cv = patch.GetAdcValue(CV_4);
+    float raw_spawn_cv = patch.GetAdcValue(CV_5);
+    float raw_splay_cv = patch.GetAdcValue(CV_6);
+    float raw_position_cv = patch.GetAdcValue(CV_7);
+    float raw_count_cv = patch.GetAdcValue(CV_8);
+
+    spawn_position_offset = (raw_position_cv + map_to_range(raw_position_pot, 0.99, 0.01)) * recording_length;
+    spawn_positions_count = 2.7f + map_to_range(raw_count_pot, 0, MAX_SPAWN_POINTS - 2);
 
     // Deadzone at 0 to the spawn position splay
-    float raw_spawn_pos_splay = map_to_range(patch.GetAdcValue(CV_7), -1, 1);
+    float raw_spawn_pos_splay = map_to_range(raw_splay_pot, 0.5, -0.5) + raw_splay_cv;
     if (raw_spawn_pos_splay < -0.05f) {
         raw_spawn_pos_splay = raw_spawn_pos_splay + 0.05f;
     } else if (raw_spawn_pos_splay > 0.05f) {
@@ -134,19 +137,29 @@ void AudioCallback(
     spawn_positions_splay = raw_spawn_pos_splay * recording_length;
 
     // pitch_shift_in_semitones = map_to_range(patch.GetAdcValue(CV_7), -12 * 5, 12 * 5); // volt per octave
-    pitch_shift_in_semitones = map_to_range(patch.GetAdcValue(CV_4), -24, 24); // Without CV this is more playable
+    pitch_shift_in_semitones = map_to_range(raw_pitch_pot, -24, 24) + raw_pitch_cv * 5 * 12; // Without CV this is more playable
 
-    grain_length = map_to_range(abs(patch.GetAdcValue(CV_2) - 0.5f) * 2, MIN_GRAIN_SIZE, MAX_GRAIN_SIZE);
-    if (patch.GetAdcValue(CV_2) < 0.5f) {
+    grain_length = map_to_range(abs(raw_length_pot - 0.5f) * 2, MIN_GRAIN_SIZE, MAX_GRAIN_SIZE);
+    if (raw_length_pot < 0.5f) {
         grain_length = -grain_length;
     }
 
-    grain_density = map_to_range(patch.GetAdcValue(CV_1) * patch.GetAdcValue(CV_1), 0.5f, MAX_GRAIN_COUNT);
-    spawn_time = abs(grain_length) / grain_density;
-    spawn_time_spread = patch.GetAdcValue(CV_5);  
-    float actual_spawn_time = spawn_time * (1 + next_spawn_offset * spawn_time_spread);
+    if (density_length_link_switch.Pressed()) {
+        spawn_time = map_to_range(1 - log10f(1 + raw_density_pot * 9), 0, MAX_GRAIN_SIZE / 4);
+    } else {
+        grain_density = map_to_range(raw_density_pot * raw_density_pot, 0.5f, MAX_GRAIN_COUNT);
+        spawn_time = abs(grain_length) / grain_density;
+    }
 
-    float reverb_amount = patch.GetAdcValue(CV_3);
+    spawn_time_spread = raw_jitter_pot;
+    float actual_spawn_time;
+    if (raw_density_pot == 0.f) {
+        actual_spawn_time = INFINITY;
+    } else {
+        actual_spawn_time = spawn_time * (1 + next_spawn_offset * spawn_time_spread);
+    }
+
+    float reverb_amount = raw_reverb_pot;
     float reverb_time = fmap(min(reverb_amount, 0.5f) * 2, 0.5f, 0.99f);
     float reverb_damp = fmap(reverb_amount, 100.f, 24000.f, Mapping::LOG);
     float reverb_wet_mix = min(reverb_amount, 0.1f) * 7;
@@ -155,8 +168,10 @@ void AudioCallback(
     reverb.SetLpFreq(reverb_damp);
 
     // Toggle the record state on button press
-    if(record_button.RisingEdge())
+    if(record_button.RisingEdge() || patch.gate_in_1.Trig())
     {
+        record_led.Write(!is_recording);
+
         if (!is_recording) {
             is_recording = true;
             recording_xfade_step = 0;
@@ -165,9 +180,17 @@ void AudioCallback(
         }
     }
 
-    is_tracking = shift_button.Pressed();
+    if (play_button.RisingEdge() || patch.gate_in_2.Trig()) {
+        is_tracking = !is_tracking;
+        play_led.Write(is_tracking);
+    }
 
-    patch.SetLed(is_tracking); 
+    if (spawn_button.FallingEdge()) {
+        primed_for_manual_spawn = true;
+    }
+
+    int time_since_last_spawn = System::GetNow() - last_spawn_time;
+    dsy_gpio_write(&patch.gate_out_2, time_since_last_spawn < SPAWN_TRIGGER_OUT_MILLIS);
 
     // Process audio
     for(size_t i = 0; i < size; i++)
@@ -216,11 +239,20 @@ void AudioCallback(
         }
 
         if (recording_length > 4800 /* A kinda abitrary number */) {
-            samples_since_last_spawn++;
+            samples_since_last_non_manual_spawn++;
+
+            bool has_spawn_timer_elapsed = samples_since_last_non_manual_spawn >= actual_spawn_time;
+            bool should_manual_spawn = spawn_button.RisingEdge() && primed_for_manual_spawn;
 
             // Spawn grains
-            if (samples_since_last_spawn >= actual_spawn_time && !available_grains.IsEmpty()) {
-                samples_since_last_spawn = 0;
+            if ((has_spawn_timer_elapsed || should_manual_spawn) && !available_grains.IsEmpty()) {
+                if (has_spawn_timer_elapsed) {
+                    samples_since_last_non_manual_spawn = 0;
+                }
+
+                if (should_manual_spawn) {
+                    primed_for_manual_spawn = false;
+                }
 
                 size_t new_grain_index = available_grains.PopBack();
 
@@ -230,6 +262,7 @@ void AudioCallback(
                 
                 grains[new_grain_index].spawn_position = get_spawn_position(next_spawn_position_index);
                 last_spawn_time_at_position[next_spawn_position_index] = System::GetNow();
+                last_spawn_time = System::GetNow();
             
                 float pitch_shift_in_octaves = pitch_shift_in_semitones / 12.f;
 
@@ -289,26 +322,30 @@ void AudioCallback(
     cpu_load_meter.OnBlockEnd();
 }
 
-uint32_t last_render_millis = 0;
-uint32_t last_debug_print_millis = 0;
-
 int main(void)
 {
     patch.Init();
-    record_button.Init(patch.B7);
-    shift_button.Init(patch.B8);
+
+    record_led.Init(patch.B7, GPIO::Mode::OUTPUT);
+    play_led.Init(patch.B8, GPIO::Mode::OUTPUT);
+
     patch.StartLog();
+
+    density_length_link_switch.Init(patch.D5, 0, Switch::TYPE_TOGGLE, Switch::POLARITY_NORMAL, Switch::PULL_NONE);
+    record_button.Init(patch.D6, 0, Switch::TYPE_MOMENTARY, Switch::POLARITY_NORMAL, Switch::PULL_NONE);
+    play_button.Init(patch.D7, 0, Switch::TYPE_MOMENTARY, Switch::POLARITY_NORMAL, Switch::PULL_NONE);
+    spawn_button.Init(patch.A8, 0, Switch::TYPE_MOMENTARY, Switch::POLARITY_NORMAL, Switch::PULL_NONE);
 
     spi.Init(
         oled.getSpiConfig(
             patch.D10, /* sclk */
-            patch.D9, /* mosi */
+            patch.A9, /* mosi */ // Using A9 instead of D9 because I fried D9
             patch.D8, /* miso */
             patch.D1 /* nss */
         )
     );
 
-    oled.init(spi, patch.A9, oled_buffer, patch);
+    oled.init(spi, patch.D8, oled_buffer, patch);
     oled.clear(0x5);
     oled.display();
 
@@ -324,6 +361,12 @@ int main(void)
     cpu_load_meter.Init(patch.AudioSampleRate(), patch.AudioBlockSize());
     reverb.Init(patch.AudioSampleRate());
     patch.StartAudio(AudioCallback);
+
+    record_led.Write(is_recording);
+    play_led.Write(is_tracking);
+
+    // Turn on LED when init is complete
+    patch.SetLed(true); 
 
     while(1) {
         if (System::GetNow() - last_render_millis > 8 && !oled.isRendering()) {
@@ -354,7 +397,7 @@ int main(void)
                 uint8_t margin = (oled.height - amplitude) / 2;
 
                 for (uint8_t y = margin; y < oled.width - margin; y++) {
-                    oled.setPixel(x, y, 0x1);
+                    oled.lightenPixel(x, y, 0x1);
                 }
             }
 
@@ -367,15 +410,15 @@ int main(void)
                     uint8_t bitmap_index = x + (y * write_head_indicator_width);
 
                     if (is_recording) {
-                        oled.setPixel(screen_x, screen_y, write_head_indicator_recording[bitmap_index]);
+                        oled.lightenPixel(screen_x, screen_y, write_head_indicator_recording[bitmap_index]);
                     } else {
-                        oled.setPixel(screen_x, screen_y, write_head_indicator_not_recording[bitmap_index]);
+                        oled.lightenPixel(screen_x, screen_y, write_head_indicator_not_recording[bitmap_index]);
                     }
                 }
             }
 
             for (int y = (oled.width / 2) - 3; y < (oled.width / 2) + 3; y++) {
-                oled.setPixel(write_head_screen_x, y, is_recording ? 0x8 : 0x2);
+                oled.lightenPixel(write_head_screen_x, y, is_recording ? 0x8 : 0x2);
             }
 
             // Grain start offset
@@ -388,11 +431,11 @@ int main(void)
                 float flash_intensity = 1 - (min(SPAWN_BAR_FLASH_MILLIS, time_since_last_spawn) / (float)SPAWN_BAR_FLASH_MILLIS);
 
                 uint8_t minColor = flash_intensity * 2;
-                uint8_t maxColor = 2 + flash_intensity * 12;
+                uint8_t maxColor = 4 + flash_intensity * 11;
 
                 for (uint8_t y = y_margin; y < oled.height - y_margin; y++) {
-                    oled.setPixel(spawn_position_x, y, map_to_range(1 - spawn_position_x_decimal_part, minColor, maxColor));
-                    oled.setPixel(wrap(spawn_position_x + 1, 0, oled.width), y, map_to_range(spawn_position_x_decimal_part, minColor, maxColor));
+                    oled.lightenPixel(spawn_position_x, y, map_to_range(1 - spawn_position_x_decimal_part, minColor, maxColor));
+                    oled.lightenPixel(wrap(spawn_position_x + 1, 0, oled.width), y, map_to_range(spawn_position_x_decimal_part, minColor, maxColor));
                 }
             }
 
@@ -407,9 +450,9 @@ int main(void)
 
                     float amplitude = 2 * min((grains[j].length - grains[j].step), grains[j].step) / (float)grains[j].length;  
 
-                    oled.setPixel(x, y, 0xA * amplitude);
-                    oled.setPixel((x + 1) % oled.width, y, 0xF * amplitude);
-                    oled.setPixel((x + 2) % oled.width, y, 0xA * amplitude);
+                    oled.lightenPixel(x, y, 0xA * amplitude);
+                    oled.lightenPixel((x + 1) % oled.width, y, 0xF * amplitude);
+                    oled.lightenPixel((x + 2) % oled.width, y, 0xA * amplitude);
                 }
             }
 
@@ -419,14 +462,14 @@ int main(void)
                 uint8_t x_avg_cpu_load = cpu_load_meter.GetAvgCpuLoad() * oled.width;
                 for (int x = 0; x < oled.width; x++) {
                     if (x == x_max_cpu_load) {
-                        oled.setPixel(x, 0, 0xF);
-                        oled.setPixel(x, 1, 0xF);
+                        oled.lightenPixel(x, 0, 0xF);
+                        oled.lightenPixel(x, 1, 0xF);
                     } else if (x <= x_avg_cpu_load) {
-                        oled.setPixel(x, 0, 0xA);
-                        oled.setPixel(x, 1, 0xA);
+                        oled.lightenPixel(x, 0, 0xA);
+                        oled.lightenPixel(x, 1, 0xA);
                     } else {
-                        oled.setPixel(x, 0, 0x0);
-                        oled.setPixel(x, 1, 0x0);
+                        oled.lightenPixel(x, 0, 0x0);
+                        oled.lightenPixel(x, 1, 0x0);
                     }
                 }
 
@@ -434,27 +477,93 @@ int main(void)
                 uint8_t alive_grains_x = (MAX_GRAIN_COUNT - available_grains.GetNumElements()) / (float)MAX_GRAIN_COUNT * oled.width;
                 for (int x = 0; x < oled.width; x++) {
                     if (x <= alive_grains_x) {
-                        oled.setPixel(x, 3, 0xA);
-                        oled.setPixel(x, 4, 0xA);
+                        oled.lightenPixel(x, 3, 0xA);
+                        oled.lightenPixel(x, 4, 0xA);
                     } else {
-                        oled.setPixel(x, 3, 0x0);
-                        oled.setPixel(x, 4, 0x0);
+                        oled.lightenPixel(x, 3, 0x0);
+                        oled.lightenPixel(x, 4, 0x0);
                     }
                 }
             }
 
             oled.display();
+
+            // Spawn LED
+            int time_since_last_spawn = System::GetNow() - last_spawn_time;
+            float spawn_led_intensity = 1 - (min(SPAWN_LED_FLASH_MILLIS, time_since_last_spawn) / (float)SPAWN_LED_FLASH_MILLIS);
+            write_spawn_led(spawn_led_intensity * 0.5f);
         }
 
-        if (System::GetNow() - last_debug_print_millis > 250) {
+        if (System::GetNow() - last_debug_print_millis > 50) {
             last_debug_print_millis = System::GetNow();
 
             // Note, this ignores any work done in this loop, eg running the OLED
             // patch.PrintLine("cpu Max: " FLT_FMT3 " Avg:" FLT_FMT3, FLT_VAR3(cpu_load_meter.GetMaxCpuLoad()), FLT_VAR3(cpu_load_meter.GetAvgCpuLoad()));
             // patch.PrintLine(FLT_FMT3, FLT_VAR3(round(map_to_range(patch.GetAdcValue(CV_7), -12, 12)) / 12));
-            patch.PrintLine(FLT_FMT3 "\t" FLT_FMT3 " %d", FLT_VAR3(grain_density), FLT_VAR3(patch.GetAdcValue(CV_1)), (MAX_GRAIN_COUNT - available_grains.GetNumElements()));
-            // patch.PrintLine("%d", last_spawn_time_at_position[0]);
+            // patch.PrintLine(FLT_FMT3 "\t" FLT_FMT3 " %d", FLT_VAR3(grain_density), FLT_VAR3(patch.GetAdcValue(CV_1)), (MAX_GRAIN_COUNT - available_grains.GetNumElements()));
+            // patch.PrintLine(FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", ", 
+            //     FLT_VAR3(patch.adc.GetMuxFloat(ADC_10, 0)), 
+            //     FLT_VAR3(patch.adc.GetMuxFloat(ADC_10, 1)),
+            //     FLT_VAR3(patch.adc.GetMuxFloat(ADC_10, 2)),
+            //     FLT_VAR3(patch.adc.GetMuxFloat(ADC_10, 3)),
+            //     FLT_VAR3(patch.adc.GetMuxFloat(ADC_10, 4)),
+            //     FLT_VAR3(patch.adc.GetMuxFloat(ADC_10, 5)),
+            //     FLT_VAR3(patch.adc.GetMuxFloat(ADC_10, 6)),
+            //     FLT_VAR3(patch.adc.GetMuxFloat(ADC_10, 7)),
+            //     FLT_VAR3(patch.GetAdcValue(ADC_9))
+            // );
+
+            patch.PrintLine(FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3, 
+                FLT_VAR3(patch.GetAdcValue(CV_1)),
+                FLT_VAR3(patch.GetAdcValue(CV_2)),
+                FLT_VAR3(patch.GetAdcValue(CV_3)),
+                FLT_VAR3(patch.GetAdcValue(CV_4)),
+                FLT_VAR3(patch.GetAdcValue(CV_5)),
+                FLT_VAR3(patch.GetAdcValue(CV_6)),
+                FLT_VAR3(patch.GetAdcValue(CV_7)),
+                FLT_VAR3(patch.GetAdcValue(CV_8))
+            );
         }
     }
-} 
- 
+}
+
+// Responsible for wrapping the index
+inline float get_sample(int index) {
+    return recording[wrap(index, 0, recording_length)];
+}
+
+inline size_t get_spawn_position(int index) {
+    int unwrapped_spawn_position;
+    
+    if (is_tracking) {
+        unwrapped_spawn_position = write_head + (spawn_position_offset - (recording_length / 2));
+    } else {
+        unwrapped_spawn_position = spawn_position_offset;
+    }
+                    
+    if (index == (int)spawn_positions_count - 1) {
+        unwrapped_spawn_position += spawn_positions_splay;
+    } else if (index != 0) {
+        unwrapped_spawn_position += index * (spawn_positions_splay / (spawn_positions_count - 2));
+    }
+    
+    return fwrap(unwrapped_spawn_position, 0.f, recording_length);
+}
+
+inline void record_xfaded_sample(float sample_in) {
+    float xfade_magnitude = (recording_xfade_step + 1) / ((float)RECORDING_XFADE_OVERLAP + 1.f);
+
+    recording[write_head] = lerp(
+        recording[write_head],
+        sample_in,
+        xfade_magnitude
+    );
+}
+
+inline void write_spawn_led(float intensity) {
+    if (intensity == 0.f) {
+        patch.WriteCvOut(CV_OUT_1, 0.f);
+    } else {
+        patch.WriteCvOut(CV_OUT_1, map_to_range(intensity * intensity, 2.35, 3.75));
+    }
+}
