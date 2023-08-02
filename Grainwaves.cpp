@@ -69,6 +69,7 @@ bool primed_for_manual_spawn = true;
 int grain_length;
 float grain_density; // Target concurrent grains
 unsigned int spawn_time; // The number of samples between each new grain
+float actual_spawn_time;
 float spawn_time_spread; // The variance of the spawn rate
 uint32_t last_spawn_time_at_position[MAX_SPAWN_POINTS] = { 0 };
 uint32_t last_spawn_time;
@@ -88,6 +89,7 @@ inline float get_sample(int index);
 inline size_t get_spawn_position(int index);
 inline void record_xfaded_sample(float sample_in);
 inline void write_spawn_led(float intensity);
+inline float envelope(float t);
 
 void AudioCallback(
     AudioHandle::InputBuffer  in,
@@ -139,7 +141,7 @@ void AudioCallback(
     // pitch_shift_in_semitones = map_to_range(patch.GetAdcValue(CV_7), -12 * 5, 12 * 5); // volt per octave
     pitch_shift_in_semitones = map_to_range(raw_pitch_pot, -24, 24) + raw_pitch_cv * 5 * 12; // Without CV this is more playable
 
-    grain_length = map_to_range(abs(raw_length_pot - 0.5f) * 2, MIN_GRAIN_SIZE, MAX_GRAIN_SIZE);
+    grain_length = map_to_range(pow(abs(raw_length_pot - 0.5f) * 2, 2), MIN_GRAIN_SIZE, MAX_GRAIN_SIZE);
     if (raw_length_pot < 0.5f) {
         grain_length = -grain_length;
     }
@@ -147,13 +149,12 @@ void AudioCallback(
     if (density_length_link_switch.Pressed()) {
         spawn_time = map_to_range(1 - log10f(1 + raw_density_pot * 9), 0, MAX_GRAIN_SIZE / 4);
     } else {
-        grain_density = map_to_range(raw_density_pot * raw_density_pot, 0.5f, MAX_GRAIN_COUNT);
+        grain_density = map_to_range(pow(raw_density_pot, 2), 0.5f, MAX_GRAIN_COUNT);
         spawn_time = abs(grain_length) / grain_density;
     }
 
     spawn_time_spread = raw_jitter_pot;
-    float actual_spawn_time;
-    if (raw_density_pot == 0.f) {
+    if (raw_density_pot <= 0.001) {
         actual_spawn_time = INFINITY;
     } else {
         actual_spawn_time = spawn_time * (1 + next_spawn_offset * spawn_time_spread);
@@ -241,7 +242,8 @@ void AudioCallback(
         if (recording_length > 4800 /* A kinda abitrary number */) {
             samples_since_last_non_manual_spawn++;
 
-            bool has_spawn_timer_elapsed = samples_since_last_non_manual_spawn >= actual_spawn_time;
+            bool has_spawn_timer_elapsed = actual_spawn_time != INFINITY 
+                    && samples_since_last_non_manual_spawn >= actual_spawn_time;
             bool should_manual_spawn = spawn_button.RisingEdge() && primed_for_manual_spawn;
 
             // Spawn grains
@@ -292,9 +294,8 @@ void AudioCallback(
                     float decimal_portion = modf(grains[j].step * grains[j].playback_speed);
                     float interpolated_sample = sample * (1 - decimal_portion) + next_sample * decimal_portion;
 
-                    // hacky bad envelope
-                    float envelope_mult = min((grains[j].length - grains[j].step), grains[j].step) / max(1.f, (float)grains[j].length);
-                    float signal = interpolated_sample * envelope_mult;
+                    float envelope_progress = min((grains[j].length - grains[j].step), grains[j].step) / max(1.f, (float)grains[j].length);
+                    float signal = interpolated_sample * envelope(envelope_progress);
 
                     wet_l += (1.f - grains[j].pan) * signal;
                     wet_r += grains[j].pan * signal;
@@ -444,11 +445,11 @@ int main(void)
                 Grain grain = grains[j];
 
                 if (grain.step <= grain.length) {
-                    uint8_t y = grain.pan * oled.height;
+                    uint8_t y = grain.pan * (oled.height - 1);
                     uint32_t current_offset = wrap(grain.spawn_position + grain.step * grains[j].playback_speed, 0, recording_length);
                     uint8_t x = (current_offset / (float)recording_length) * oled.width;
 
-                    float amplitude = 2 * min((grains[j].length - grains[j].step), grains[j].step) / (float)grains[j].length;  
+                    float amplitude = 2 * envelope(min((grains[j].length - grains[j].step), grains[j].step) / (float)grains[j].length);  
 
                     oled.lightenPixel(x, y, 0xA * amplitude);
                     oled.lightenPixel((x + 1) % oled.width, y, 0xF * amplitude);
@@ -499,8 +500,8 @@ int main(void)
 
             // Note, this ignores any work done in this loop, eg running the OLED
             // patch.PrintLine("cpu Max: " FLT_FMT3 " Avg:" FLT_FMT3, FLT_VAR3(cpu_load_meter.GetMaxCpuLoad()), FLT_VAR3(cpu_load_meter.GetAvgCpuLoad()));
-            // patch.PrintLine(FLT_FMT3, FLT_VAR3(round(map_to_range(patch.GetAdcValue(CV_7), -12, 12)) / 12));
-            // patch.PrintLine(FLT_FMT3 "\t" FLT_FMT3 " %d", FLT_VAR3(grain_density), FLT_VAR3(patch.GetAdcValue(CV_1)), (MAX_GRAIN_COUNT - available_grains.GetNumElements()));
+            // patch.PrintLine(FLT_FMT3, FLT_VAR3(patch.adc.GetMuxFloat(ADC_10, 4)));
+            patch.PrintLine("%d", patch.adc.GetMuxFloat(ADC_10, 4) <= 0.001);
             // patch.PrintLine(FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", ", 
             //     FLT_VAR3(patch.adc.GetMuxFloat(ADC_10, 0)), 
             //     FLT_VAR3(patch.adc.GetMuxFloat(ADC_10, 1)),
@@ -513,16 +514,16 @@ int main(void)
             //     FLT_VAR3(patch.GetAdcValue(ADC_9))
             // );
 
-            patch.PrintLine(FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3, 
-                FLT_VAR3(patch.GetAdcValue(CV_1)),
-                FLT_VAR3(patch.GetAdcValue(CV_2)),
-                FLT_VAR3(patch.GetAdcValue(CV_3)),
-                FLT_VAR3(patch.GetAdcValue(CV_4)),
-                FLT_VAR3(patch.GetAdcValue(CV_5)),
-                FLT_VAR3(patch.GetAdcValue(CV_6)),
-                FLT_VAR3(patch.GetAdcValue(CV_7)),
-                FLT_VAR3(patch.GetAdcValue(CV_8))
-            );
+            // patch.PrintLine(FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3, 
+            //     FLT_VAR3(patch.GetAdcValue(CV_1)),
+            //     FLT_VAR3(patch.GetAdcValue(CV_2)),
+            //     FLT_VAR3(patch.GetAdcValue(CV_3)),
+            //     FLT_VAR3(patch.GetAdcValue(CV_4)),
+            //     FLT_VAR3(patch.GetAdcValue(CV_5)),
+            //     FLT_VAR3(patch.GetAdcValue(CV_6)),
+            //     FLT_VAR3(patch.GetAdcValue(CV_7)),
+            //     FLT_VAR3(patch.GetAdcValue(CV_8))
+            // );
         }
     }
 }
@@ -566,4 +567,8 @@ inline void write_spawn_led(float intensity) {
     } else {
         patch.WriteCvOut(CV_OUT_1, map_to_range(intensity * intensity, 2.35, 3.75));
     }
+}
+
+inline float envelope(float t) {
+    return t * t * (3.0f - 2.0f * t);
 }
