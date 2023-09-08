@@ -3,6 +3,7 @@
 #include "core_cm7.h"
 #include "Daisy_SSD1327/Daisy_SSD1327.h"
 #include "utils.h"
+#include "grain.h"
 #include "bitmaps.h"
 
 using namespace daisy;
@@ -20,14 +21,6 @@ const uint8_t MAX_SPAWN_POINTS = 7;
 const int SPAWN_BAR_FLASH_MILLIS = 250;
 const int SPAWN_LED_FLASH_MILLIS = 250;
 const int SPAWN_TRIGGER_OUT_MILLIS = 2;
-
-struct Grain {
-    int length = 0;
-    int spawn_position = 0;
-    int step = 0;
-    float pan = 0; // 0 is left, 1 is right.
-    float playback_speed = 0;
-};
 
 DaisyPatchSM patch;
 CpuLoadMeter cpu_load_meter;
@@ -93,20 +86,27 @@ void AudioCallback(
     size_t size
 );
 
+void lightenPixel(iVec2 coords, uint8_t color) {
+    oled.lightenPixel(coords.x, coords.y, color);
+}
+
 inline float envelope(float t) {
     return t * t * (3.0f - 2.0f * t);
 }
 
+// Returns the sample offset of the nth spawn
 inline size_t get_spawn_position(int index) {
     int unwrapped_spawn_position;
     
     if (is_tracking) {
+        // Offset the spawn position by the write head
         unwrapped_spawn_position = write_head + (spawn_position_offset - (recording_length / 2));
     } else {
         unwrapped_spawn_position = spawn_position_offset;
     }
                     
-    if (index == (int)spawn_positions_count - 1) {
+    // Modify the spawn position based on splay and count
+    if (index >= (int)spawn_positions_count - 1) {
         unwrapped_spawn_position += spawn_positions_splay;
     } else if (index != 0) {
         unwrapped_spawn_position += index * (spawn_positions_splay / (spawn_positions_count - 2));
@@ -115,84 +115,114 @@ inline size_t get_spawn_position(int index) {
     return fwrap(unwrapped_spawn_position, 0.f, recording_length);
 }
 
+float renderable_recording_at_deg(float deg) {
+    size_t renderable_recording_index = fwrap(deg, 0, 360) / 360.f * RENDERABLE_RECORDING_BUFFER_SIZE;
+    float amplitude = min(0.5f, renderable_recording[renderable_recording_index] * 5) * 2; 
+    return 40 + amplitude * 32;
+}
+
 void draw_recorded_waveform() {
-    uint8_t last_amplitude = 0;
-    // Traversing backwards stops the leading wave of recording
-    // affecting values infront of it due to how the smoothing filter works
-    for (int x = oled.width - 1; x >= 0; x--) {
-        size_t renderable_recording_index = (x / (float)oled.width) * RENDERABLE_RECORDING_BUFFER_SIZE;
+    float rotation = System::GetNow() * 360 / 100000.f; // 1 rotation per 100 seconds
+    uint8_t steps = 80;
+    float deg_per_step = 360 / steps;
 
-        uint8_t amplitude = min(128.f, renderable_recording[renderable_recording_index] / 0.1f * oled.height);
+    for (int i = 0; i < steps; i++) {
+        for (int r = 40; r < 64; r++) {
+            float deg;
+            if (r % 3 != 0) {
+                deg = i * deg_per_step + rotation - (r - 40);
+            } else {
+                deg = i * deg_per_step - rotation + (r - 40);
+            }
 
-        // Smooth out the waveform
-        // TODO: Smooth differently, this produces weird classic LPF shapes
-        if (x > 0) {
-            amplitude = amplitude * 0.4 + last_amplitude * 0.6;
-        }
-        last_amplitude = amplitude;
+            uint8_t end_r = renderable_recording_at_deg(deg);
 
-        uint8_t margin = (oled.height - amplitude) / 2;
-
-        for (uint8_t y = margin; y < oled.width - margin; y++) {
-            oled.lightenPixel(x, y, 0x1);
+            if (r < end_r) {
+                // lightenPixel(polarToCartesian(r, deg), 1 + (i) % 2);
+                lightenPixel(polarToCartesian(r, deg), 2);
+            }
         }
     }
 }
 
 void draw_write_head_indicator() {
-    uint8_t write_head_screen_x = ((write_head / (float)RECORDING_BUFFER_SIZE) * oled.width - 1);
-    for (int x = 0; x < write_head_indicator_width; x++) {
-        for (int y = 0; y < write_head_indicator_height; y++) {
-            uint8_t screen_x = wrap(x + write_head_screen_x - write_head_indicator_width / 2, 0, oled.width);
-            uint8_t screen_y = wrap(y + oled.height - write_head_indicator_height, 0, oled.height);
-            uint8_t bitmap_index = x + (y * write_head_indicator_width);
+    float write_head_deg = write_head / (float)RECORDING_BUFFER_SIZE * 360;
 
-            if (is_recording) {
-                oled.lightenPixel(screen_x, screen_y, write_head_indicator_recording[bitmap_index]);
-            } else {
-                oled.lightenPixel(screen_x, screen_y, write_head_indicator_not_recording[bitmap_index]);
-            }
-        }
+    for (int r = 38; r < 44; r++) {
+        lightenPixel(polarToCartesian(r, write_head_deg), is_recording ? 10 : 5);
     }
+}
 
-    for (int y = (oled.width / 2) - 3; y < (oled.width / 2) + 3; y++) {
-        oled.lightenPixel(write_head_screen_x, y, is_recording ? 0x8 : 0x2);
+void draw_color_circle() {
+    for (int deg = 0; deg < 360; deg++) {
+        for (int r = 20; r < 40; r++) {
+            lightenPixel(polarToCartesian(r, deg), deg / 22.5);
+        }
     }
 }
 
 void draw_grain_spawn_positions() {
-    uint8_t y_margin = 8;
-
     for (int i = 0; i < (int)spawn_positions_count; i++) {
-        float spawn_position_x = get_spawn_position(i) / (float)recording_length * oled.width;
-        float spawn_position_x_decimal_part = modf(spawn_position_x);
-        int time_since_last_spawn = System::GetNow() - last_spawn_time_at_position[i];
-        float flash_intensity = 1 - (min(SPAWN_BAR_FLASH_MILLIS, time_since_last_spawn) / (float)SPAWN_BAR_FLASH_MILLIS);
+        float spawn_position_deg = get_spawn_position(i) / (float)recording_length * 360;
 
-        uint8_t minColor = flash_intensity * 2;
-        uint8_t maxColor = 4 + flash_intensity * 11;
+        // lightenPixel(polarToCartesian(16, spawn_position_deg), 8);
+        if (i == 0) {
+            for (int8_t j = -4; j <= 4; j++) {
+                lightenPixel(polarToCartesian(17, spawn_position_deg + j * degs_per_pixel[17]), 8);
+            }
 
-        for (uint8_t y = y_margin; y < oled.height - y_margin; y++) {
-            oled.lightenPixel(spawn_position_x, y, map_to_range(1 - spawn_position_x_decimal_part, minColor, maxColor));
-            oled.lightenPixel(wrap(spawn_position_x + 1, 0, oled.width), y, map_to_range(spawn_position_x_decimal_part, minColor, maxColor));
+            for (int8_t j = -10; j <= 10; j++) {
+                lightenPixel(polarToCartesian(14, spawn_position_deg + j * degs_per_pixel[14]), 8);
+            }
+        }
+
+        for (uint8_t r = 17; r < 64; r++) {
+            lightenPixel(polarToCartesian(r, spawn_position_deg), (i == 0) ? 4 : 2);
+        }
+    }
+}
+
+void draw_spawn_flashes() {
+    for (int i = 0; i < MAX_GRAIN_COUNT; i++) {
+        Grain grain = grains[i];
+
+        uint32_t time_since_spawn = grain.step / 48;
+
+        if (time_since_spawn < SPAWN_BAR_FLASH_MILLIS) {
+            uint8_t r_start = 40 - grain.pitch_shift_in_octaves * 3 - 3;
+            uint8_t r_end = r_start + 6;
+
+            for (int r = r_start; r < r_end; r++) {
+                float spawn_position_deg = get_spawn_position(grain.spawn_position_index) / (float)recording_length * 360;
+                float mult = 1 - (time_since_spawn / (float)SPAWN_BAR_FLASH_MILLIS);
+
+                lightenPixel(
+                    polarToCartesian(r, spawn_position_deg),
+                    map_to_range(mult * mult, 4, 12)
+                );
+            }
         }
     }
 }
 
 void draw_grains() {
-    for (int j = 0; j < MAX_GRAIN_COUNT; j++) {
-        Grain grain = grains[j];
+    for (int i = 0; i < MAX_GRAIN_COUNT; i++) {
+        Grain grain = grains[i];
 
-        if (grain.step <= grain.length) {
-            uint8_t y = grain.pan * (oled.height - 1);
-            uint32_t current_offset = wrap(grain.spawn_position + grain.step * grains[j].playback_speed, 0, recording_length);
-            uint8_t x = (current_offset / (float)recording_length) * oled.width;
+        if (is_alive(grain)) {
+            uint32_t sample_offset = wrap(grain.spawn_position + grain.step * grain.playback_speed, 0, recording_length);
+            float deg = (sample_offset / (float)recording_length) * 360;
+            uint8_t r = 40 - grain.pitch_shift_in_octaves * 3;
 
-            float amplitude = 2 * envelope(min((grains[j].length - grains[j].step), grains[j].step) / (float)grains[j].length);  
+            uint8_t tail_length = 2 + powf((64 - r) / 24.f, 3.f);
+            float amplitude = 2 * envelope(min((grain.length - grain.step), grain.step) / (float)grain.length);  
 
-            oled.lightenPixel(x, y, 0xA * amplitude);
-            oled.lightenPixel((x + 1) % oled.width, y, 0xF * amplitude);
-            oled.lightenPixel((x + 2) % oled.width, y, 0xA * amplitude);
+            for (int j = 0; j < tail_length; j++) {
+                lightenPixel(
+                    polarToCartesian(r, deg - j * degs_per_pixel[r]), 
+                    3 + 13 * amplitude
+                );
+            }
         }
     }
 }
@@ -203,14 +233,14 @@ void draw_performance_bars() {
     uint8_t x_avg_cpu_load = cpu_load_meter.GetAvgCpuLoad() * oled.width;
     for (int x = 0; x < oled.width; x++) {
         if (x == x_max_cpu_load) {
-            oled.lightenPixel(x, 0, 0xF);
-            oled.lightenPixel(x, 1, 0xF);
+            oled.lightenPixel(x, 0, 10);
+            oled.lightenPixel(x, 1, 10);
         } else if (x <= x_avg_cpu_load) {
-            oled.lightenPixel(x, 0, 0xA);
-            oled.lightenPixel(x, 1, 0xA);
+            oled.lightenPixel(x, 0, 3);
+            oled.lightenPixel(x, 1, 3);
         } else {
-            oled.lightenPixel(x, 0, 0x0);
-            oled.lightenPixel(x, 1, 0x0);
+            oled.lightenPixel(x, 0, 0);
+            oled.lightenPixel(x, 1, 0);
         }
     }
 
@@ -218,11 +248,11 @@ void draw_performance_bars() {
     uint8_t alive_grains_x = (MAX_GRAIN_COUNT - available_grains.GetNumElements()) / (float)MAX_GRAIN_COUNT * oled.width;
     for (int x = 0; x < oled.width; x++) {
         if (x <= alive_grains_x) {
-            oled.lightenPixel(x, 3, 0xA);
-            oled.lightenPixel(x, 4, 0xA);
+            oled.lightenPixel(x, 3, 3);
+            oled.lightenPixel(x, 4, 3);
         } else {
-            oled.lightenPixel(x, 3, 0x0);
-            oled.lightenPixel(x, 4, 0x0);
+            oled.lightenPixel(x, 3, 0);
+            oled.lightenPixel(x, 4, 0);
         }
     }
 }
@@ -357,11 +387,14 @@ void spawn_grain() {
     grains[new_grain_index].step = 0;
     grains[new_grain_index].pan = 0.5f + randF(-0.5f, 0.5f);
     
+    grains[new_grain_index].spawn_position_index = next_spawn_position_index;
     grains[new_grain_index].spawn_position = get_spawn_position(next_spawn_position_index);
+
     last_spawn_time_at_position[next_spawn_position_index] = System::GetNow();
     last_spawn_time = System::GetNow();
 
     float pitch_shift_in_octaves = pitch_shift_in_semitones / 12.f;
+    grains[new_grain_index].pitch_shift_in_octaves = pitch_shift_in_octaves;
 
     // Reverse the playback if the length is negative
     if (grain_length > 0) {
@@ -427,7 +460,7 @@ void calculate_audio_out(float in_l, float in_r, float &out_l, float &out_r) {
     float wet_r = 0.f;
 
     for (int j = 0; j < MAX_GRAIN_COUNT; j++) {
-        if (grains[j].step <= grains[j].length) {
+        if (is_alive(grains[j])) {
             size_t buffer_index = grains[j].spawn_position + grains[j].step * grains[j].playback_speed;
 
             // playback_speed is a float so we need to interpolate between samples
@@ -510,8 +543,9 @@ void log_debug_info() {
 
     // Note, this ignores any work done in this loop, eg running the OLED
     // patch.PrintLine("cpu Max: " FLT_FMT3 " Avg:" FLT_FMT3, FLT_VAR3(cpu_load_meter.GetMaxCpuLoad()), FLT_VAR3(cpu_load_meter.GetAvgCpuLoad()));
-    // patch.PrintLine(FLT_FMT3, FLT_VAR3(patch.adc.GetMuxFloat(ADC_10, 4)));
-    patch.PrintLine("%d", patch.adc.GetMuxFloat(ADC_10, 4) <= 0.001);
+    // patch.PrintLine(FLT_FMT3, FLT_VAR3(renderable_recording[(int)(write_head * RECORDING_TO_RENDERABLE_RECORDING_BUFFER_RATIO)]));
+    // patch.PrintLine(FLT_FMT3, FLT_VAR3(test));
+    // patch.PrintLine("%d", patch.adc.GetMuxFloat(ADC_10, 4) <= 0.001);
     // patch.PrintLine(FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", ", 
     //     FLT_VAR3(patch.adc.GetMuxFloat(ADC_10, 0)), 
     //     FLT_VAR3(patch.adc.GetMuxFloat(ADC_10, 1)),
@@ -556,7 +590,7 @@ void AudioCallback(
         // Progresses the write head regardless of if we're recording
         increment_write_head(); 
 
-        // Workout if we need to spawn a grain this sample
+        // Work out if we need to spawn a grain this sample
         samples_since_last_non_manual_spawn++;
 
         bool has_spawn_timer_elapsed = actual_spawn_time != INFINITY 
@@ -593,9 +627,11 @@ int main(void)
             last_oled_update_millis = System::GetNow();
 
             oled.clear(SSD1327_BLACK);
+            // draw_color_circle();
             draw_recorded_waveform();
             draw_write_head_indicator();
             draw_grain_spawn_positions();
+            draw_spawn_flashes();
             draw_grains();
             if (SHOW_PERFORMANCE_BARS) { draw_performance_bars(); }
             oled.display();
