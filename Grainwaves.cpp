@@ -17,7 +17,9 @@ const int MIN_GRAIN_SIZE = 480; // 10 ms
 const int MAX_GRAIN_SIZE = 48000 * 2; // 2 second
 const int MAX_GRAIN_COUNT = 32;
 const bool SHOW_PERFORMANCE_BARS = true;
-const uint8_t MAX_SPAWN_POINTS = 7;
+const uint8_t MAX_SPAWN_POINTS_POT = 5;
+const uint8_t MAX_SPAWN_POINTS_CV = 5;
+const uint8_t MAX_SPAWN_POINTS = MAX_SPAWN_POINTS_POT + MAX_SPAWN_POINTS_CV + 2;
 const int SPAWN_BAR_FLASH_MILLIS = 250;
 const int SPAWN_LED_FLASH_MILLIS = 250;
 const int SPAWN_TRIGGER_OUT_MILLIS = 2;
@@ -64,7 +66,6 @@ float grain_density; // Target concurrent grains
 unsigned int spawn_time; // The number of samples between each new grain
 float actual_spawn_time;
 float spawn_time_spread; // The variance of the spawn rate
-uint32_t last_spawn_time_at_position[MAX_SPAWN_POINTS] = { 0 };
 uint32_t last_spawn_time;
 float reverb_wet_mix;
 
@@ -96,14 +97,7 @@ inline float envelope(float t) {
 
 // Returns the sample offset of the nth spawn
 inline size_t get_spawn_position(int index) {
-    int unwrapped_spawn_position;
-    
-    if (is_tracking) {
-        // Offset the spawn position by the write head
-        unwrapped_spawn_position = write_head + (spawn_position_offset - (recording_length / 2));
-    } else {
-        unwrapped_spawn_position = spawn_position_offset;
-    }
+    int unwrapped_spawn_position = spawn_position_offset;
                     
     // Modify the spawn position based on splay and count
     if (index >= (int)spawn_positions_count - 1) {
@@ -306,11 +300,10 @@ void process_controls() {
     float raw_position_cv = patch.GetAdcValue(CV_7);
     float raw_count_cv = patch.GetAdcValue(CV_8);
 
-    spawn_position_offset = (raw_position_cv + map_to_range(raw_position_pot, 0.99, 0.01)) * recording_length;
-    spawn_positions_count = 2.7f + map_to_range(raw_count_pot, 0, MAX_SPAWN_POINTS - 2);
+    spawn_position_scan_speed = raw_position_cv + pow(map_to_range(raw_position_pot, 1, -1), 3);
 
     // Deadzone at 0 to the spawn position splay
-    float raw_spawn_pos_splay = map_to_range(raw_splay_pot, 0.5, -0.5) + raw_splay_cv;
+    float raw_spawn_pos_splay = map_to_range(raw_splay_pot, 1, -1) * abs(map_to_range(raw_splay_pot, 1, -1)) * 0.5f + raw_splay_cv;
     if (raw_spawn_pos_splay < -0.05f) {
         raw_spawn_pos_splay = raw_spawn_pos_splay + 0.05f;
     } else if (raw_spawn_pos_splay > 0.05f) {
@@ -320,24 +313,33 @@ void process_controls() {
         spawn_positions_count = 1;
     }
     spawn_positions_splay = raw_spawn_pos_splay * recording_length;
+     
+    spawn_positions_count = 2.f // This should technically be 1 if splay is 0, but it simpler if we just pretend there's always 2
+            + 0.7f // Start precocked so it doesn't take much pot twiddling to see the 3rd spawn point
+            + map_to_range(raw_count_pot, 0, MAX_SPAWN_POINTS_POT) 
+            + map_to_range(raw_count_cv, 0, MAX_SPAWN_POINTS_CV);
+    // Make sure it doesn't dip below 2.7 due to negative cv values
+    spawn_positions_count = max(spawn_positions_count, 2.7f);
 
     // pitch_shift_in_semitones = map_to_range(patch.GetAdcValue(CV_7), -12 * 5, 12 * 5); // volt per octave
     pitch_shift_in_semitones = map_to_range(raw_pitch_pot, -24, 24) + raw_pitch_cv * 5 * 12; // Without CV this is more playable
 
-    grain_length = map_to_range(pow(abs(raw_length_pot - 0.5f) * 2, 2), MIN_GRAIN_SIZE, MAX_GRAIN_SIZE);
-    if (raw_length_pot < 0.5f) {
+    float grain_length_control = coerce_in_range(raw_length_cv + raw_length_pot * 2 - 1, -1, 1);
+    grain_length = map_to_range(pow(abs(grain_length_control), 2), MIN_GRAIN_SIZE, MAX_GRAIN_SIZE);
+    if (grain_length_control < 0) {
         grain_length = -grain_length;
     }
 
+    float density_control = coerce_in_range(raw_density_pot + raw_density_cv, 0, 1);
     if (density_length_link_switch.Pressed()) {
-        spawn_time = map_to_range(1 - log10f(1 + raw_density_pot * 9), 0, MAX_GRAIN_SIZE / 4);
+        spawn_time = map_to_range(1 - log10f(1 + density_control * 9), 0, MAX_GRAIN_SIZE / 4);
     } else {
-        grain_density = map_to_range(pow(raw_density_pot, 2), 0.5f, MAX_GRAIN_COUNT);
+        grain_density = map_to_range(pow(density_control, 2), 0.5f, MAX_GRAIN_COUNT);
         spawn_time = abs(grain_length) / grain_density;
     }
 
     spawn_time_spread = raw_jitter_pot;
-    if (raw_density_pot <= 0.001) {
+    if (density_control <= 0.001) {
         actual_spawn_time = INFINITY;
     } else {
         actual_spawn_time = spawn_time * (1 + next_spawn_offset * spawn_time_spread);
@@ -390,7 +392,6 @@ void spawn_grain() {
     grains[new_grain_index].spawn_position_index = next_spawn_position_index;
     grains[new_grain_index].spawn_position = get_spawn_position(next_spawn_position_index);
 
-    last_spawn_time_at_position[next_spawn_position_index] = System::GetNow();
     last_spawn_time = System::GetNow();
 
     float pitch_shift_in_octaves = pitch_shift_in_semitones / 12.f;
@@ -611,6 +612,9 @@ void AudioCallback(
         }
 
         calculate_audio_out(IN_L[i], IN_L[i], OUT_L[i], OUT_R[i]);
+
+        spawn_position_offset += spawn_position_scan_speed;
+        spawn_position_offset = fwrap(spawn_position_offset, 0, RECORDING_BUFFER_SIZE);
     }
 
     cpu_load_meter.OnBlockEnd();

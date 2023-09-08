@@ -4,6 +4,7 @@
 #include "daisysp.h"
 
 using namespace daisysp;
+using namespace std;
 
 const float DEG_TO_TAU = PI_F * 2 / 360;
 
@@ -36,6 +37,10 @@ inline float randF(float min, float max) {
 
 inline float map_to_range(float fraction, float min, float max) {
     return min + fraction * (max - min);
+}
+
+inline float coerce_in_range(float value, float minimum, float maximum) {
+    return max(min(value, maximum), minimum);
 }
 
 inline float modf(float x) {
