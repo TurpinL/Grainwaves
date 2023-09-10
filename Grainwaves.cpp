@@ -117,14 +117,14 @@ float renderable_recording_at_deg(float deg) {
 
 void draw_recorded_waveform() {
     float rotation = System::GetNow() * 360 / 100000.f; // 1 rotation per 100 seconds
-    uint8_t steps = 80;
-    float deg_per_step = 360 / steps;
+    uint8_t steps = 60;
+    float deg_per_step = 360 / (float)steps;
 
     for (int i = 0; i < steps; i++) {
         for (int r = 40; r < 64; r++) {
             float deg;
             if (r % 3 != 0) {
-                deg = i * deg_per_step + rotation - (r - 40);
+                deg = i * deg_per_step + rotation - (r - 40) * deg_per_step * 0.6f + (i % 15 * 8);
             } else {
                 deg = i * deg_per_step - rotation + (r - 40);
             }
@@ -132,8 +132,7 @@ void draw_recorded_waveform() {
             uint8_t end_r = renderable_recording_at_deg(deg);
 
             if (r < end_r) {
-                // lightenPixel(polarToCartesian(r, deg), 1 + (i) % 2);
-                lightenPixel(polarToCartesian(r, deg), 2);
+                lightenPixel(polarToCartesian(r, deg), 3);
             }
         }
     }
@@ -306,8 +305,8 @@ void process_controls() {
 
     // Scan speed
     spawn_position_scan_speed = with_dead_zone(
-        raw_position_cv + pow(map_to_range(raw_position_pot, 1, -1), 3),
-        0.1f
+        raw_position_cv + pow(map_to_range(raw_position_pot, 1, -1), 2),
+        0.02f
     );
 
     // Splay
@@ -557,7 +556,7 @@ void log_debug_info() {
     // Note, this ignores any work done in this loop, eg running the OLED
     // patch.PrintLine("cpu Max: " FLT_FMT3 " Avg:" FLT_FMT3, FLT_VAR3(cpu_load_meter.GetMaxCpuLoad()), FLT_VAR3(cpu_load_meter.GetAvgCpuLoad()));
     // patch.PrintLine(FLT_FMT3, FLT_VAR3(renderable_recording[(int)(write_head * RECORDING_TO_RENDERABLE_RECORDING_BUFFER_RATIO)]));
-    // patch.PrintLine(FLT_FMT3 ", " FLT_FMT3, FLT_VAR3(pitch_shift_in_octaves), FLT_VAR3(patch.GetAdcValue(CV_2) * 5));
+    patch.PrintLine(FLT_FMT3 ", " FLT_FMT3, FLT_VAR3(spawn_position_scan_speed), FLT_VAR3(spawn_position_scan_speed));
     // patch.PrintLine("%d", patch.adc.GetMuxFloat(ADC_10, 4) <= 0.001);
 
     // patch.PrintLine(FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", ", 
