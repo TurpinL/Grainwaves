@@ -5,6 +5,7 @@ struct Grain {
     int length = 0;
     int spawn_position_index = 0;
     int spawn_position = 0;
+    uint32_t spawn_time_millis = 0;
     int step = 0;
     float pan = 0; // 0 is left, 1 is right.
     float playback_speed = 0;

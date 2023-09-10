@@ -184,7 +184,7 @@ void draw_spawn_flashes() {
     for (int i = 0; i < MAX_GRAIN_COUNT; i++) {
         Grain grain = grains[i];
 
-        uint32_t time_since_spawn = grain.step / 48;
+        uint32_t time_since_spawn = System::GetNow() - grain.spawn_time_millis;
 
         if (time_since_spawn < SPAWN_BAR_FLASH_MILLIS) {
             uint8_t r_start = pitch_to_radius(grain.pitch_shift_in_octaves) - 3;
@@ -404,7 +404,8 @@ void spawn_grain() {
     grains[new_grain_index].spawn_position_index = next_spawn_position_index;
     grains[new_grain_index].spawn_position = get_spawn_position(next_spawn_position_index);
 
-    last_spawn_time = System::GetNow();
+    grains[new_grain_index].spawn_time_millis = System::GetNow();
+    last_spawn_time = grains[new_grain_index].spawn_time_millis;
 
     grains[new_grain_index].pitch_shift_in_octaves = pitch_shift_in_octaves;
 
@@ -556,8 +557,9 @@ void log_debug_info() {
     // Note, this ignores any work done in this loop, eg running the OLED
     // patch.PrintLine("cpu Max: " FLT_FMT3 " Avg:" FLT_FMT3, FLT_VAR3(cpu_load_meter.GetMaxCpuLoad()), FLT_VAR3(cpu_load_meter.GetAvgCpuLoad()));
     // patch.PrintLine(FLT_FMT3, FLT_VAR3(renderable_recording[(int)(write_head * RECORDING_TO_RENDERABLE_RECORDING_BUFFER_RATIO)]));
-    patch.PrintLine(FLT_FMT3 ", " FLT_FMT3, FLT_VAR3(pitch_shift_in_octaves), FLT_VAR3(patch.GetAdcValue(CV_2) * 5));
+    // patch.PrintLine(FLT_FMT3 ", " FLT_FMT3, FLT_VAR3(pitch_shift_in_octaves), FLT_VAR3(patch.GetAdcValue(CV_2) * 5));
     // patch.PrintLine("%d", patch.adc.GetMuxFloat(ADC_10, 4) <= 0.001);
+
     // patch.PrintLine(FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", " FLT_FMT3 ", ", 
     //     FLT_VAR3(patch.adc.GetMuxFloat(ADC_10, 0)), 
     //     FLT_VAR3(patch.adc.GetMuxFloat(ADC_10, 1)),
