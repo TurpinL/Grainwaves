@@ -252,6 +252,18 @@ void draw_performance_bars() {
             oled.lightenPixel(x, 4, 0);
         }
     }
+
+    // FPS
+    uint8_t fps_x = (1000 / (float)(System::GetNow() - last_oled_update_millis)) / (float)120 * oled.width;
+    for (int x = 0; x < oled.width; x++) {
+        if (x <= fps_x) {
+            oled.lightenPixel(x, 5, 3);
+            oled.lightenPixel(x, 6, 3);
+        } else {
+            oled.lightenPixel(x, 5, 0);
+            oled.lightenPixel(x, 6, 0);
+        }
+    }
 }
 
 // Responsible for wrapping the index
@@ -640,8 +652,6 @@ int main(void)
     while(1) {
         // Draw to oled
         if (System::GetNow() - last_oled_update_millis > 8 && !oled.isRendering()) {
-            last_oled_update_millis = System::GetNow();
-
             oled.clear(SSD1327_BLACK);
             // draw_color_circle();
             draw_recorded_waveform();
@@ -651,6 +661,8 @@ int main(void)
             draw_grains();
             if (SHOW_PERFORMANCE_BARS) { draw_performance_bars(); }
             oled.display();
+
+            last_oled_update_millis = System::GetNow();
         }
 
         // LEDs
