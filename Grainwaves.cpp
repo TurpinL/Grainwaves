@@ -5,6 +5,7 @@
 #include "utils.h"
 #include "grain.h"
 #include "bitmaps.h"
+#include "gateInEnhanced.h"
 
 using namespace daisy;
 using namespace patch_sm;
@@ -30,9 +31,8 @@ CpuLoadMeter cpu_load_meter;
 Switch       density_length_link_switch;
 Switch       spawn_button;
 Switch       record_button;
-Switch       play_button;
 GPIO         record_led;
-GPIO         play_led;
+GateInEnhanced spawn_gate;
 
 ReverbSc     reverb;
 
@@ -50,7 +50,6 @@ const float RENDERABLE_RECORDING_TO_RECORDING_BUFFER_RATIO = RECORDING_BUFFER_SI
 float DSY_SDRAM_BSS renderable_recording[RENDERABLE_RECORDING_BUFFER_SIZE]; // Much lower resolution, for easy rendering
 size_t last_written_renderable_recording_index = 0; 
 
-bool is_tracking = false;
 bool is_recording = true;
 bool is_stopping_recording = false;
 size_t recording_xfade_step = 0;
@@ -292,9 +291,9 @@ inline void write_spawn_led(float intensity) {
 void process_controls() {
     patch.ProcessAllControls();
     record_button.Debounce();
-    play_button.Debounce();
     spawn_button.Debounce();
     density_length_link_switch.Debounce();
+    spawn_gate.Update();
 
     float raw_pitch_pot = patch.GetAdcValue(ADC_9);
     float raw_length_pot = patch.adc.GetMuxFloat(ADC_10, 0);
@@ -304,20 +303,19 @@ void process_controls() {
     float raw_density_pot = patch.adc.GetMuxFloat(ADC_10, 4);
     float raw_count_pot = patch.adc.GetMuxFloat(ADC_10, 5);
     float raw_reverb_pot = patch.adc.GetMuxFloat(ADC_10, 6);
-    float raw_spawn_volume_pot = patch.adc.GetMuxFloat(ADC_10, 7);
+    float raw_volume_pot = patch.adc.GetMuxFloat(ADC_10, 7);
 
     float raw_reverb_cv = patch.GetAdcValue(CV_1);
     float raw_pitch_cv = patch.GetAdcValue(CV_2);
     float raw_length_cv = patch.GetAdcValue(CV_3);
     float raw_density_cv = patch.GetAdcValue(CV_4);
-    float raw_spawn_cv = patch.GetAdcValue(CV_5);
     float raw_splay_cv = patch.GetAdcValue(CV_6);
     float raw_position_cv = patch.GetAdcValue(CV_7);
     float raw_count_cv = patch.GetAdcValue(CV_8);
 
     // Scan speed
     spawn_position_scan_speed = with_dead_zone(
-        raw_position_cv + pow(map_to_range(raw_position_pot, 1, -1), 2),
+        raw_position_cv + map_to_range(raw_position_pot, 1, -1) * abs(map_to_range(raw_position_pot, 1, -1)),
         0.02f
     );
 
@@ -389,14 +387,8 @@ void process_controls() {
         }
     }
 
-    // Play button/gate
-    if (play_button.RisingEdge() || patch.gate_in_2.Trig()) {
-        is_tracking = !is_tracking;
-        play_led.Write(is_tracking);
-    }
-
     // Spawn button
-    if (spawn_button.FallingEdge()) {
+    if (spawn_button.FallingEdge() || spawn_gate.FallingEdge()) {
         primed_for_manual_spawn = true;
     }
 
@@ -523,16 +515,12 @@ void init() {
 
     // Init GPIO
     density_length_link_switch.Init(patch.D5, 0, Switch::TYPE_TOGGLE, Switch::POLARITY_NORMAL, Switch::PULL_NONE);
-    record_button.Init(patch.D6, 0, Switch::TYPE_MOMENTARY, Switch::POLARITY_NORMAL, Switch::PULL_NONE);
-    play_button.Init(patch.D7, 0, Switch::TYPE_MOMENTARY, Switch::POLARITY_NORMAL, Switch::PULL_NONE);
+    record_button.Init(patch.D7, 0, Switch::TYPE_MOMENTARY, Switch::POLARITY_NORMAL, Switch::PULL_NONE);
     spawn_button.Init(patch.A8, 0, Switch::TYPE_MOMENTARY, Switch::POLARITY_NORMAL, Switch::PULL_NONE);
+    spawn_gate.Init(patch.gate_in_2);
     
-    record_led.Init(patch.B7, GPIO::Mode::OUTPUT);
+    record_led.Init(patch.B8, GPIO::Mode::OUTPUT);
     record_led.Write(is_recording);
-
-    play_led.Init(patch.B8, GPIO::Mode::OUTPUT);
-    play_led.Write(is_tracking);
-
 
     // Init OLED
     spi.Init(
@@ -620,7 +608,7 @@ void AudioCallback(
 
         bool has_spawn_timer_elapsed = actual_spawn_time != INFINITY 
                 && samples_since_last_non_manual_spawn >= actual_spawn_time;
-        bool should_manual_spawn = spawn_button.RisingEdge() && primed_for_manual_spawn;
+        bool should_manual_spawn = (spawn_gate.RisingEdge() || spawn_button.RisingEdge()) && primed_for_manual_spawn;
 
         // Spawn grains
         if ((has_spawn_timer_elapsed || should_manual_spawn) && !available_grains.IsEmpty()) {
